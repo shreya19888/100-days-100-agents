@@ -46,14 +46,13 @@ The Clinical Note Structuring Assistant accepts a free-text clinical note and us
 
 **Live Demo**
 
-Coming Soon 🚧
+(https://clinical-note-structuring.vercel.app/)
 
 ---
 
 ## 📸 Screenshots
 
-_Coming Soon_
-
+![alt text](demo 1.png)
 ---
 
 ## 🏗 Architecture
