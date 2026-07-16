@@ -52,7 +52,7 @@ The Clinical Note Structuring Assistant accepts a free-text clinical note and us
 
 ## 📸 Screenshots
 
-![alt text](demo 1.png)
+![Clinical Note Structuring Assistant](demo-1.png)
 ---
 
 ## 🏗 Architecture
