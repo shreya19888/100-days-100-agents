@@ -1,4 +1,4 @@
-import { Assessment } from "@/types/climate";
+import { Assessment } from "../types/climate";
 
 type AIRecommendationProps = {
   assessment: Assessment | null;

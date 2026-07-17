@@ -3,7 +3,7 @@
 import { Search, MapPin, Loader2, Brain } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { City } from "@/types/climate";
+import { City } from "../types/climate";
 
 type SearchBarProps = {
   onAnalyze: (city: City) => void;

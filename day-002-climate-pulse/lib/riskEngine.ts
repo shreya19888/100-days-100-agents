@@ -1,4 +1,4 @@
-import { Weather } from "@/types/climate";
+import { Weather } from "../types/climate";
 
 export type RiskAssessment = {
   overallRisk: "Low" | "Moderate" | "High" | "Extreme";

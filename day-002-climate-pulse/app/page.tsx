@@ -2,17 +2,17 @@
 
 import { useState } from "react";
 
-import Header from "@/components/Header";
-import PersonaSelector from "@/components/PersonaSelector";
-import SearchBar from "@/components/SearchBar";
-import WeatherCards from "@/components/WeatherCards";
-import AIRecommendation from "@/components/AIRecommendation";
+import Header from "../components/Header";
+import PersonaSelector from "../components/PersonaSelector";
+import SearchBar from "../components/SearchBar";
+import WeatherCards from "../components/WeatherCards";
+import AIRecommendation from "../components/AIRecommendation";
 
 import {
   Assessment,
   City,
   Weather,
-} from "@/types/climate";
+} from "../types/climate";
 
 export default function Home() {
   const [persona, setPersona] =
