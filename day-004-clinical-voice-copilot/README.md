@@ -17,7 +17,9 @@ Clinical Voice Copilot converts spoken patient encounters into structured SOAP n
 
 ---
 
-## 🖼 Demo
+## 🚀 Live Demo
+
+🔗 https://clinical-voice-copilot-sand.vercel.app/
 
 ### Home Screen
 
