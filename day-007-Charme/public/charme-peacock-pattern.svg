@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" fill="none">
+  <!-- Peacock feather + block-print motif  use at ~57% opacity -->
+  <g stroke="#24344D" stroke-width="1.15" fill="none" opacity="0.9">
+    <!-- Stamped feather eyes -->
+    <g transform="translate(28 36)">
+      <path d="M18 4c8 10 8 22 0 32-8-10-8-22 0-32Z"/>
+      <ellipse cx="18" cy="20" rx="5" ry="6.5" fill="#24344D" opacity="0.35"/>
+      <ellipse cx="18" cy="20" rx="2.8" ry="3.6" fill="#66735A" opacity="0.45"/>
+      <circle cx="18" cy="19.2" r="1.1" fill="#C49A3A" opacity="0.55"/>
+    </g>
+    <g transform="translate(118 22) rotate(18)">
+      <path d="M18 4c8 10 8 22 0 32-8-10-8-22 0-32Z"/>
+      <ellipse cx="18" cy="20" rx="5" ry="6.5" fill="#24344D" opacity="0.3"/>
+      <ellipse cx="18" cy="20" rx="2.8" ry="3.6" fill="#66735A" opacity="0.4"/>
+      <circle cx="18" cy="19.2" r="1.1" fill="#C49A3A" opacity="0.5"/>
+    </g>
+    <g transform="translate(178 78) rotate(-12)">
+      <path d="M18 4c8 10 8 22 0 32-8-10-8-22 0-32Z"/>
+      <ellipse cx="18" cy="20" rx="5" ry="6.5" fill="#24344D" opacity="0.32"/>
+      <circle cx="18" cy="19.2" r="1.1" fill="#C49A3A" opacity="0.45"/>
+    </g>
+    <g transform="translate(48 128) rotate(8)">
+      <path d="M18 4c8 10 8 22 0 32-8-10-8-22 0-32Z"/>
+      <ellipse cx="18" cy="20" rx="5" ry="6.5" fill="#24344D" opacity="0.28"/>
+      <ellipse cx="18" cy="20" rx="2.8" ry="3.6" fill="#66735A" opacity="0.38"/>
+    </g>
+    <g transform="translate(140 148) rotate(-22)">
+      <path d="M18 4c8 10 8 22 0 32-8-10-8-22 0-32Z"/>
+      <ellipse cx="18" cy="20" rx="5" ry="6.5" fill="#24344D" opacity="0.3"/>
+      <circle cx="18" cy="19.2" r="1.1" fill="#A85C45" opacity="0.4"/>
+    </g>
+    <!-- Tiny C arcs like stamped ornaments -->
+    <path d="M210 40c-8-8-20-8-28 0" stroke-linecap="round" opacity="0.35"/>
+    <path d="M36 200c-8-8-20-8-28 0" stroke-linecap="round" opacity="0.3"/>
+    <path d="M200 200c-6-10-18-12-28-4" stroke-linecap="round" opacity="0.28"/>
+  </g>
+</svg>

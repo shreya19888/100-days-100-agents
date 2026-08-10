@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" fill="none" role="img" aria-label="CHARME peacock mark">
+  <!-- Minimal Indian peacock forming a "C"  full color -->
+  <!-- Outer feather arcs (open to the right = C) -->
+  <path d="M68 22c-8-10-22-14-34-10C18 18 10 34 12 50c2 18 16 30 34 30 8 0 16-2 22-7"
+        stroke="#24344D" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+  <path d="M62 28c-6-7-16-11-26-8C22 24 16 36 17 48c1.2 13 12 22 26 22 6 0 12-1.4 16-4.5"
+        stroke="#24344D" stroke-width="2.2" stroke-linecap="round" fill="none" opacity="0.85"/>
+  <path d="M56 34c-4.5-5-12-7.5-19-5.5C27 31 23 39 24 47c0.8 9 8.5 15.5 18 15.5 4.2 0 8.2-1 11-3.2"
+        stroke="#66735A" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+
+  <!-- Subtle inner arc -->
+  <path d="M50 40c-3-3.2-7.5-4.8-12-3.4-4.2 1.3-7 5.4-6.5 9.8 0.5 5.2 4.8 8.8 10.2 8.8"
+        stroke="#24344D" stroke-width="1.4" stroke-linecap="round" fill="none" opacity="0.55"/>
+
+  <!-- Feather eye motif (upper arc) -->
+  <ellipse cx="58" cy="26" rx="5.2" ry="6.4" transform="rotate(-28 58 26)" fill="#24344D"/>
+  <ellipse cx="58" cy="26" rx="3.2" ry="4" transform="rotate(-28 58 26)" fill="#66735A"/>
+  <ellipse cx="58.2" cy="25.4" rx="1.35" ry="1.7" transform="rotate(-28 58.2 25.4)" fill="#C49A3A"/>
+  <circle cx="58.5" cy="24.8" r="0.55" fill="#A85C45"/>
+
+  <!-- Small secondary eye on mid arc -->
+  <ellipse cx="64" cy="48" rx="3.4" ry="4.2" transform="rotate(12 64 48)" fill="#24344D" opacity="0.9"/>
+  <ellipse cx="64" cy="48" rx="2" ry="2.5" transform="rotate(12 64 48)" fill="#66735A"/>
+  <circle cx="64.3" cy="47.4" r="0.85" fill="#C49A3A"/>
+
+  <!-- Minimal crest / head suggestion at top of C -->
+  <path d="M54 18c2.5-4 6-6.5 10-7-1.2 3.2-1 6.2 0.8 8.8"
+        stroke="#24344D" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+  <circle cx="52.5" cy="20.5" r="1.6" fill="#24344D"/>
+</svg>

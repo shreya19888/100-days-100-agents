@@ -1,0 +1,259 @@
+@import "tailwindcss";
+
+:root {
+  /* Peacock identity — deep indigo / neem / marigold / terracotta */
+  --charme-bg: #f7f1e8;
+  --charme-bg-deep: #ebe1d2;
+  --charme-surface: rgba(255, 251, 245, 0.92);
+  --charme-text: #2a211a;
+  --charme-muted: #6f6154;
+  --charme-primary: #24344d; /* deep indigo — modern lens / insight */
+  --charme-secondary: #66735a; /* neem — nourish */
+  --charme-accent: #a85c45; /* terracotta — traditional lens */
+  --charme-highlight: #c49a3a; /* marigold — ritual */
+  --charme-sandalwood: #d8c3a5;
+  --charme-ivory: #faf6ef;
+  --charme-border: rgba(42, 33, 26, 0.14);
+  --charme-success: #3f6b4f;
+  --charme-warning: #b8892f;
+  --charme-caution: #9a4f3a;
+  --charme-shadow: 0 18px 48px rgba(42, 33, 26, 0.1);
+
+  /* Legacy aliases used across existing components */
+  --charme-ink: var(--charme-text);
+  --charme-line: var(--charme-border);
+  --charme-leaf: var(--charme-secondary);
+  --charme-leaf-soft: #e4e8df;
+  --charme-clay: var(--charme-accent);
+  --charme-saffron: var(--charme-highlight);
+  --charme-marigold: #c49a3a;
+  --charme-mehndi: #4a5642;
+  --charme-indigo: var(--charme-primary);
+  --charme-sand: var(--charme-sandalwood);
+  --charme-cream: var(--charme-ivory);
+  --charme-brass: #b08a4a;
+  --charme-card: var(--charme-surface);
+}
+
+@theme inline {
+  --color-charme-bg: var(--charme-bg);
+  --color-charme-bg-deep: var(--charme-bg-deep);
+  --color-charme-surface: var(--charme-surface);
+  --color-charme-text: var(--charme-text);
+  --color-charme-muted: var(--charme-muted);
+  --color-charme-primary: var(--charme-primary);
+  --color-charme-secondary: var(--charme-secondary);
+  --color-charme-accent: var(--charme-accent);
+  --color-charme-highlight: var(--charme-highlight);
+  --color-charme-sandalwood: var(--charme-sandalwood);
+  --color-charme-ivory: var(--charme-ivory);
+  --color-charme-border: var(--charme-border);
+  --color-charme-success: var(--charme-success);
+  --color-charme-warning: var(--charme-warning);
+  --color-charme-caution: var(--charme-caution);
+
+  --color-charme-ink: var(--charme-ink);
+  --color-charme-line: var(--charme-line);
+  --color-charme-leaf: var(--charme-leaf);
+  --color-charme-leaf-soft: var(--charme-leaf-soft);
+  --color-charme-clay: var(--charme-clay);
+  --color-charme-saffron: var(--charme-saffron);
+  --color-charme-marigold: var(--charme-marigold);
+  --color-charme-mehndi: var(--charme-mehndi);
+  --color-charme-indigo: var(--charme-indigo);
+  --color-charme-sand: var(--charme-sand);
+  --color-charme-cream: var(--charme-cream);
+  --color-charme-brass: var(--charme-brass);
+
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--charme-text);
+  background:
+    radial-gradient(ellipse 60% 40% at 4% -6%, rgba(168, 106, 74, 0.1), transparent 55%),
+    radial-gradient(ellipse 50% 36% at 100% 0%, rgba(47, 61, 82, 0.1), transparent 52%),
+    radial-gradient(ellipse 40% 28% at 60% 100%, rgba(61, 87, 68, 0.08), transparent 55%),
+    linear-gradient(180deg, var(--charme-ivory) 0%, var(--charme-bg) 48%, var(--charme-bg-deep) 100%);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+::selection {
+  background: rgba(168, 106, 74, 0.22);
+}
+
+.font-display {
+  font-family: var(--font-display), Georgia, "Times New Roman", serif;
+}
+
+.charme-card {
+  background: var(--charme-surface);
+  border: 1px solid var(--charme-border);
+  box-shadow: var(--charme-shadow);
+  backdrop-filter: blur(12px);
+}
+
+/* Peacock feather + block-print — hero / insight only (~5–7%) */
+.peacock-pattern {
+  background-image: url("/charme-peacock-pattern.svg");
+  background-size: 240px 240px;
+  background-repeat: repeat;
+  opacity: 0.055;
+  pointer-events: none;
+}
+
+/* Alias for any remaining references */
+.block-print-texture {
+  background-image: url("/charme-peacock-pattern.svg");
+  background-size: 240px 240px;
+  background-repeat: repeat;
+  opacity: 0.055;
+  pointer-events: none;
+}
+
+.botanical-grid {
+  background-image:
+    radial-gradient(circle at 20% 30%, rgba(36, 52, 77, 0.05) 0 1px, transparent 2px),
+    radial-gradient(circle at 70% 60%, rgba(168, 92, 69, 0.05) 0 1px, transparent 2px);
+  background-size: 48px 48px, 64px 64px;
+}
+
+.jaali-border {
+  position: relative;
+}
+
+.jaali-border::before {
+  content: "";
+  position: absolute;
+  inset: 11px;
+  border: 1px solid rgba(36, 52, 77, 0.16);
+  border-radius: 1.4rem;
+  pointer-events: none;
+}
+
+.mirror-frame {
+  position: relative;
+  border-radius: 50% / 46%;
+  background:
+    radial-gradient(circle at 50% 35%, rgba(255, 252, 247, 0.96), rgba(216, 195, 165, 0.7) 62%, rgba(36, 52, 77, 0.12));
+  box-shadow:
+    inset 0 0 0 1px rgba(36, 52, 77, 0.22),
+    inset 0 0 0 8px rgba(250, 246, 239, 0.55),
+    0 24px 60px rgba(42, 33, 26, 0.12);
+}
+
+.ornament-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--charme-accent);
+}
+
+.ornament-line::before,
+.ornament-line::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, transparent, rgba(168, 106, 74, 0.5), transparent);
+}
+
+.ornament-dot {
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--charme-accent);
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: rgba(201, 162, 74, 0.4);
+}
+
+.lens-modern {
+  border-top: 3px solid var(--charme-primary); /* deep indigo */
+}
+
+.lens-traditional {
+  border-top: 3px solid var(--charme-accent); /* terracotta */
+}
+
+.lens-nourish {
+  border-top: 3px solid var(--charme-secondary); /* neem */
+}
+
+.lens-ritual {
+  border-top: 3px solid var(--charme-highlight); /* marigold / sandalwood ritual */
+}
+
+.insight-peacock {
+  border-left: 3px solid var(--charme-primary);
+}
+
+@keyframes float-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.08);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shimmer-gold {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+.animate-float-soft {
+  animation: float-soft 6s ease-in-out infinite;
+}
+
+.animate-fade-up {
+  animation: fade-up 0.7s ease both;
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 2.2s ease-out infinite;
+}
+
+.animate-shimmer-gold {
+  animation: shimmer-gold 4s ease-in-out infinite;
+}
