@@ -15,5 +15,5 @@ Build 100 practical AI agents that solve real-world problems across healthcare, 
 | 003 | Jul 18, 2026 | **PolicyLens AI** | Agentic RAG | Human Resources | ✅ Live | 🌐 [Demo](https://policylensai-chi.vercel.app) |
 | 004 | Jul 19, 2026 | **Clinical Voice Copilot** | Voice AI | Healthcare | ✅ Live | 🌐 [Demo](https://clinical-voice-copilot-sand.vercel.app) |
 | 005 | Aug 03, 2026 | **DataPilot AI** | AI Mentor | Data Engineering | ✅ Live | 🌐 [Demo](https://datapilotai-j07o2081f-shreyachakrabarti19-2079s-projects.vercel.app/) |
-| 006 | — | **Project Atlas OS** | AI for Social Good | Social Good | 🚧 Building | Coming Soon |
+| 006 | — | **Community Pilot AI** | AI for Social Good | Social Good | 🚧 Building | Coming Soon |
 | 007 | Aug 10, 2026 | **CHARME** | Skin AI + Wellness | Beauty & Wellness | ✅ Live | 🌐 [Demo](https://charme-jz6hci47x-shreyachakrabarti19-2079s-projects.vercel.app/) |
