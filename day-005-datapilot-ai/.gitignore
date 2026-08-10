@@ -18,3 +18,8 @@ Thumbs.db
 
 # logs
 npm-debug.log*
+
+# Demo videos
+*.mp4
+*.mov
+*.avi
