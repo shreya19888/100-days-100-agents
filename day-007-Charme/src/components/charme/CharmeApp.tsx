@@ -115,6 +115,10 @@ export function CharmeApp() {
       .catch(() => setDemoMode(true));
   }, [searchParams]);
 
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [step]);
+
   const headerStep = useMemo(() => {
     switch (step) {
       case "landing":
