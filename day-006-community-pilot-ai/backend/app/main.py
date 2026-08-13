@@ -78,10 +78,37 @@ async def community_requests():
 async def create_voice_donation(payload: dict[str, Any]):
     print("VAPI DONATION:", payload)
 
+    tool_calls = payload.get("message", {}).get("toolCallList", [])
+
+    if not tool_calls:
+        return {
+            "results": []
+        }
+
+    results = []
+
+    for tool_call in tool_calls:
+        tool_call_id = tool_call.get("id")
+
+        arguments = tool_call.get("function", {}).get(
+            "arguments",
+            {},
+        )
+
+        print("DONATION ARGUMENTS:", arguments)
+
+        results.append(
+            {
+                "toolCallId": tool_call_id,
+                "result": (
+                    "Food donation information received "
+                    "successfully."
+                ),
+            }
+        )
+
     return {
-        "success": True,
-        "message": "Food donation received successfully.",
-        "donation": payload,
+        "results": results
     }
 
 # -------------------------------------------------------------------
