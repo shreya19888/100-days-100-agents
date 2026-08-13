@@ -294,3 +294,96 @@ def create_donation(data: dict[str, Any]) -> dict[str, Any]:
         )
 
     return response.data[0]
+
+
+# -------------------------------------------------------------------
+# Dispatch Assignments
+# -------------------------------------------------------------------
+
+DISPATCH_ASSIGNMENTS_TABLE = "Dispatch Assignment"
+
+
+def create_dispatch_assignment(
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a dispatch assignment before volunteer outreach."""
+
+    assignment = {
+        "donation_id": data.get("donation_id"),
+        "request_id": data.get("request_id"),
+        "volunteer_id": data.get("volunteer_id"),
+        "meals_assigned": int(
+            data.get("meals_assigned", 0)
+        ),
+        "status": "outreach_pending",
+        "pickup_address": data.get("pickup_address"),
+        "pickup_city": data.get("pickup_city"),
+        "pickup_deadline": data.get("pickup_deadline"),
+        "delivery_organization": data.get(
+            "delivery_organization"
+        ),
+        "delivery_address": data.get(
+            "delivery_address"
+        ),
+        "delivery_city": data.get(
+            "delivery_city"
+        ),
+        "delivery_instructions": data.get(
+            "delivery_instructions"
+        ),
+    }
+
+    response = (
+        supabase
+        .table(DISPATCH_ASSIGNMENTS_TABLE)
+        .insert(assignment)
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not return the created assignment."
+        )
+
+    return response.data[0]
+
+
+def update_dispatch_assignment(
+    assignment_id: str,
+    outcome: str,
+    vapi_call_id: str | None = None,
+) -> dict[str, Any]:
+    """Update a dispatch assignment after volunteer outreach."""
+
+    status_map = {
+        "accepted": "confirmed",
+        "declined": "needs_reassignment",
+        "uncertain": "outreach_uncertain",
+    }
+
+    update_data = {
+        "volunteer_outcome": outcome,
+        "status": status_map.get(
+            outcome,
+            "outreach_uncertain",
+        ),
+        "updated_at": datetime.now().isoformat(),
+    }
+
+    if vapi_call_id:
+        update_data["vapi_call_id"] = vapi_call_id
+
+    response = (
+        supabase
+        .table(DISPATCH_ASSIGNMENTS_TABLE)
+        .update(update_data)
+        .eq("id", assignment_id)
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not return the updated assignment."
+        )
+
+    return response.data[0]

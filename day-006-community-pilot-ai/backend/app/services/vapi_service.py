@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 
 import requests
@@ -16,6 +17,49 @@ VAPI_OUTREACH_ASSISTANT_ID = os.getenv(
     "VAPI_OUTREACH_ASSISTANT_ID"
 )
 
+
+# -------------------------------------------------------------------
+# Phone number helper
+# -------------------------------------------------------------------
+
+def normalize_phone_number(phone: Any) -> str:
+    """
+    Convert common US phone formats to E.164.
+
+    Examples:
+        4083061143       -> +14083061143
+        (408) 306-1143   -> +14083061143
+        +1 408 306 1143  -> +14083061143
+    """
+
+    if not phone:
+        raise ValueError("Phone number is missing.")
+
+    value = str(phone).strip()
+
+    # Keep digits only
+    digits = re.sub(r"\D", "", value)
+
+    # US number without country code
+    if len(digits) == 10:
+        return f"+1{digits}"
+
+    # US number already includes country code
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"+{digits}"
+
+    # Already international format
+    if value.startswith("+"):
+        return value
+
+    raise ValueError(
+        f"Phone number could not be converted to E.164: {phone}"
+    )
+
+
+# -------------------------------------------------------------------
+# Place volunteer call
+# -------------------------------------------------------------------
 
 def place_volunteer_call(
     volunteer: dict[str, Any],
@@ -37,56 +81,112 @@ def place_volunteer_call(
             "VAPI_PHONE_NUMBER_ID is not configured."
         )
 
-    phone = volunteer.get("phone")
+    # ---------------------------------------------------------------
+    # Normalize volunteer phone number
+    # ---------------------------------------------------------------
 
-    if not phone:
-        raise ValueError(
-            "Volunteer does not have a phone number."
-        )
+    phone = normalize_phone_number(
+        volunteer.get("phone")
+    )
+
+    print("=== NORMALIZED VOLUNTEER PHONE ===")
+    print(phone)
+
+    # ---------------------------------------------------------------
+    # Build Vapi payload
+    # ---------------------------------------------------------------
 
     payload = {
         "assistantId": VAPI_OUTREACH_ASSISTANT_ID,
+
         "phoneNumberId": VAPI_PHONE_NUMBER_ID,
+
         "customer": {
-            "number": str(phone),
+            "number": phone,
             "name": volunteer.get("name"),
         },
+
         "assistantOverrides": {
             "variableValues": {
+
+                # ---------------------------------------------------
+                # Assignment identifiers
+                # ---------------------------------------------------
+
+                "assignment_id": assignment.get(
+                    "assignment_id",
+                    "",
+                ),
+
+                "donation_id": assignment.get(
+                    "donation_id",
+                    "",
+                ),
+
+                "request_id": assignment.get(
+                    "request_id",
+                    "",
+                ),
+
+                "volunteer_id": assignment.get(
+                    "volunteer_id",
+                    "",
+                ),
+
+                # ---------------------------------------------------
+                # Volunteer
+                # ---------------------------------------------------
+
                 "volunteer_name": volunteer.get(
                     "name",
                     "",
                 ),
+
+                # ---------------------------------------------------
+                # Pickup
+                # ---------------------------------------------------
+
                 "meals_assigned": str(
                     assignment.get(
                         "meals_assigned",
                         0,
                     )
                 ),
+
                 "pickup_address": assignment.get(
                     "pickup_address",
                     "",
                 ),
+
                 "pickup_city": assignment.get(
                     "pickup_city",
                     "",
                 ),
-                "delivery_organization": assignment.get(
-                    "delivery_organization",
-                    "",
-                ),
-                "delivery_address": assignment.get(
-                    "delivery_address",
-                    "",
-                ),
-                "delivery_city": assignment.get(
-                    "delivery_city",
-                    "",
-                ),
+
                 "pickup_deadline": assignment.get(
                     "pickup_deadline",
                     "",
                 ),
+
+                # ---------------------------------------------------
+                # Delivery
+                # ---------------------------------------------------
+
+                "delivery_organization": assignment.get(
+                    "delivery_organization",
+                    "",
+                ),
+
+                "delivery_address": assignment.get(
+                    "delivery_address",
+                    "",
+                ),
+
+                "delivery_city": assignment.get(
+                    "delivery_city",
+                    "",
+                ),
+
                 "delivery_instructions": assignment.get(
                     "delivery_instructions",
                     "",
@@ -94,6 +194,10 @@ def place_volunteer_call(
             }
         },
     }
+
+    # ---------------------------------------------------------------
+    # Call Vapi
+    # ---------------------------------------------------------------
 
     response = requests.post(
         VAPI_API_URL,
@@ -110,6 +214,10 @@ def place_volunteer_call(
 
     print("=== VAPI RESPONSE ===")
     print(response.text)
+
+    # ---------------------------------------------------------------
+    # Handle errors
+    # ---------------------------------------------------------------
 
     if not response.ok:
         raise RuntimeError(
