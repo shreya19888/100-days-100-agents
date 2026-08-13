@@ -252,58 +252,40 @@ def get_data_summary() -> dict[str, int]:
     }
 
 def create_donation(data: dict[str, Any]) -> dict[str, Any]:
-    """Create a food donation from a voice intake."""
+    """Create a food donation from voice intake."""
 
     donation = {
-        "restaurant_name": data.get(
-            "restaurant_name"
+        "restaurant_business_name": data.get("restaurant_name"),
+        "contact_name": data.get("contact_name"),
+        "contact_email": data.get("contact_email"),
+        "contact_phone": str(data.get("contact_phone", "")),
+        "what_type_of_food_is_available": data.get("food_type"),
+        "approximately_how_many_meals_or_servings_are_available": str(
+            data.get("meals", "")
         ),
-        "contact_name": data.get(
-            "contact_name"
-        ),
-        "contact_phone": data.get(
-            "contact_phone"
-        ),
-        "contact_email": data.get(
-            "contact_email"
-        ),
-        "food_type": data.get(
-            "food_type"
-        ),
-        "meals": data.get(
-            "meals"
-        ),
-        "dietary_information": data.get(
+        "what_dietary_information_should_recipients_know": data.get(
             "dietary_information"
         ),
-        "available_from": data.get(
+        "when_will_the_food_be_ready_for_pickup": data.get(
             "available_from"
         ),
-        "pickup_deadline": data.get(
+        "what_is_the_latest_time_the_food_can_be_picked_up": data.get(
             "pickup_deadline"
         ),
-        "packaged": data.get(
-            "packaged"
+        "is_the_food_packaged_and_ready_for_transport": (
+            "Yes" if data.get("packaged") else "No"
         ),
-        "pickup_address": data.get(
-            "pickup_address"
-        ),
-        "city": data.get(
-            "city"
-        ),
-        "zip_code": data.get(
-            "zip_code"
-        ),
-        "notes": data.get(
+        "pickup_address": data.get("pickup_address"),
+        "city": data.get("city"),
+        "zip_code": str(data.get("zip_code", "")),
+        "anything_else_the_pickup_team_should_know": data.get(
             "notes"
         ),
     }
 
     response = supabase.table(
         FOOD_DONATIONS_TABLE
-    ).insert(
-        donation
-    ).execute()
+    ).insert(donation).execute()
 
     if not response.data:
         raise RuntimeError(
