@@ -250,3 +250,64 @@ def get_data_summary() -> dict[str, int]:
             volunteer["capacity"] for volunteer in volunteers
         ),
     }
+
+def create_donation(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a food donation from a voice intake."""
+
+    donation = {
+        "restaurant_name": data.get(
+            "restaurant_name"
+        ),
+        "contact_name": data.get(
+            "contact_name"
+        ),
+        "contact_phone": data.get(
+            "contact_phone"
+        ),
+        "contact_email": data.get(
+            "contact_email"
+        ),
+        "food_type": data.get(
+            "food_type"
+        ),
+        "meals": data.get(
+            "meals"
+        ),
+        "dietary_information": data.get(
+            "dietary_information"
+        ),
+        "available_from": data.get(
+            "available_from"
+        ),
+        "pickup_deadline": data.get(
+            "pickup_deadline"
+        ),
+        "packaged": data.get(
+            "packaged"
+        ),
+        "pickup_address": data.get(
+            "pickup_address"
+        ),
+        "city": data.get(
+            "city"
+        ),
+        "zip_code": data.get(
+            "zip_code"
+        ),
+        "notes": data.get(
+            "notes"
+        ),
+    }
+
+    response = supabase.table(
+        FOOD_DONATIONS_TABLE
+    ).insert(
+        donation
+    ).execute()
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase did not return the created donation."
+        )
+
+    return response.data[0]
