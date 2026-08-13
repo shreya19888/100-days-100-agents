@@ -1,7 +1,7 @@
 from typing import Any
 
 from app.database import supabase
-
+from datetime import datetime
 
 # -------------------------------------------------------------------
 # Raw Whalesync tables
@@ -256,6 +256,7 @@ def create_donation(data: dict[str, Any]) -> dict[str, Any]:
 
     donation = {
         "restaurant_business_name": data.get("restaurant_name"),
+        "timestamp": datetime.now().isoformat(),
         "contact_name": data.get("contact_name"),
         "contact_email": data.get("contact_email"),
         "contact_phone": str(data.get("contact_phone", "")),

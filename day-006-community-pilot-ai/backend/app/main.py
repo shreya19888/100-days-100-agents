@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastapi import FastAPI
-
+from app.services.vapi_service import place_volunteer_call
 from app.agents.coordinator import CoordinatorAgent
 from app.agents.matching_agent import MatchingAgent
 from app.agents.routing_agent import RoutingAgent
@@ -12,7 +12,9 @@ from app.services.data_service import (
     get_volunteers,
     get_community_requests,
 )
-
+from app.agents.volunteer_outreach_agent import (
+    VolunteerOutreachAgent,
+)
 
 app = FastAPI(
     title="Community Pilot AI",
@@ -369,4 +371,243 @@ async def dispatch():
             "matches_found": len(matches),
             "plans_created": len(plans),
         },
+    }
+
+# -------------------------------------------------------------------
+# Volunteer Outreach
+# -------------------------------------------------------------------
+
+@app.post("/api/dispatch/outreach")
+async def dispatch_outreach():
+
+    # ---------------------------------------------------------------
+    # 1. Load live data
+    # ---------------------------------------------------------------
+
+    donations = get_donations()
+    volunteers = get_volunteers()
+    requests = get_community_requests()
+
+    if not donations:
+        return {
+            "status": "no_donations",
+            "message": "No food donations are currently available.",
+        }
+
+    if not volunteers:
+        return {
+            "status": "no_volunteers",
+            "message": "No volunteers are currently available.",
+        }
+
+    if not requests:
+        return {
+            "status": "no_requests",
+            "message": (
+                "No community food requests are currently available."
+            ),
+        }
+
+    # ---------------------------------------------------------------
+    # 2. Run matching
+    # ---------------------------------------------------------------
+
+    matching_agent = MatchingAgent()
+
+    matches = matching_agent.find_matches(
+        donations=donations,
+        requests=requests,
+        volunteers=volunteers,
+    )
+
+    if not matches:
+        return {
+            "status": "no_matches",
+            "message": "No dispatch matches were found.",
+        }
+
+    # ---------------------------------------------------------------
+    # 3. Build dispatch plans
+    # ---------------------------------------------------------------
+
+    routing_agent = RoutingAgent()
+    coordinator = CoordinatorAgent()
+    outreach_agent = VolunteerOutreachAgent()
+
+    plans = []
+
+    for match in matches:
+
+        donation = next(
+            (
+                donation
+                for donation in donations
+                if donation["id"] == match["donation_id"]
+            ),
+            None,
+        )
+
+        request = next(
+            (
+                request
+                for request in requests
+                if request["id"] == match["request_id"]
+            ),
+            None,
+        )
+
+        if not donation or not request:
+            continue
+
+        routes = []
+
+        for volunteer_match in match["volunteers"]:
+
+            volunteer = next(
+                (
+                    volunteer
+                    for volunteer in volunteers
+                    if volunteer["id"]
+                    == volunteer_match["volunteer_id"]
+                ),
+                None,
+            )
+
+            if not volunteer:
+                continue
+
+            route = routing_agent.evaluate_route(
+                volunteer=volunteer,
+                donation=donation,
+                request=request,
+                meals_assigned=volunteer_match[
+                    "meals_assigned"
+                ],
+            )
+
+            routes.append(route)
+
+        routed_match = {
+            **match,
+            "routes": routes,
+        }
+
+        plan = coordinator.create_plan(
+            donation=donation,
+            request=request,
+            match=routed_match,
+        )
+
+        plan["routes"] = routes
+
+        # -----------------------------------------------------------
+        # Enrich volunteer information for outreach
+        # -----------------------------------------------------------
+
+        outreach_volunteers = []
+
+        for volunteer_match in match["volunteers"]:
+
+            volunteer = next(
+                (
+                    volunteer
+                    for volunteer in volunteers
+                    if volunteer["id"]
+                    == volunteer_match["volunteer_id"]
+                ),
+                None,
+            )
+
+            if not volunteer:
+                continue
+
+            outreach_volunteers.append(
+                {
+                    **volunteer_match,
+                    "phone": volunteer.get("phone"),
+                    "email": volunteer.get("email"),
+                }
+            )
+
+        plan["delivery"]["volunteers"] = (
+            outreach_volunteers
+        )
+
+        # -----------------------------------------------------------
+        # Prepare outreach
+        # -----------------------------------------------------------
+
+        outreach = outreach_agent.prepare_outreach(
+            plan
+        )
+
+        plans.append(
+            {
+                "plan": plan,
+                "outreach": outreach,
+            }
+        )
+
+    return {
+        "status": "outreach_ready",
+        "plans": plans,
+        "summary": {
+            "plans_created": len(plans),
+            "volunteers_to_contact": sum(
+                len(plan["outreach"])
+                for plan in plans
+            ),
+        },
+    }
+
+@app.post("/api/test-call")
+async def test_call():
+    volunteer = {
+        "name": "Shreya",
+        "phone": "+14083061143",
+    }
+
+    assignment = {
+        "meals_assigned": 5,
+        "pickup_address": "100 Market Street",
+        "pickup_city": "San Jose",
+        "delivery_organization": "Community Resource Center",
+        "delivery_address": "200 Market Street",
+        "delivery_city": "San Jose",
+        "pickup_deadline": "8:00 PM",
+        "delivery_instructions": "Please call upon arrival.",
+    }
+
+    result = place_volunteer_call(
+        volunteer=volunteer,
+        assignment=assignment,
+    )
+
+    return {
+        "status": "call_initiated",
+        "vapi": result,
+    }
+
+# -------------------------------------------------------------------
+# Volunteer response webhook
+# -------------------------------------------------------------------
+
+@app.post("/api/voice/volunteer-response")
+async def volunteer_response(payload: dict[str, Any]):
+
+    print("=== VAPI VOLUNTEER RESPONSE ===")
+    print(payload)
+
+    message = payload.get("message", {})
+
+    # Vapi can send the final structured response
+    # inside the analysis object.
+    analysis = message.get("analysis", {})
+
+    print("=== ANALYSIS ===")
+    print(analysis)
+
+    return {
+        "status": "received",
+        "message": "Volunteer response received.",
     }

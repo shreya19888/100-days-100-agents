@@ -44,20 +44,14 @@ class CoordinatorAgent:
             "recommendation": recommendation,
             "donation": {
                 "id": donation.get("id"),
-                "restaurant_name": donation.get(
-                    "restaurant_name"
-                ),
+                "restaurant_name": donation.get("restaurant_name"),
                 "food_type": donation.get("food_type"),
                 "meals_available": donation.get("meals"),
                 "dietary_information": donation.get(
-                    "dietary_information"
-                ),
-                "pickup_address": donation.get(
-                    "pickup_address"
-                ),
-                "pickup_deadline": donation.get(
-                    "pickup_deadline"
-                ),
+                    "dietary_information"),
+                "pickup_address": donation.get("pickup_address"),
+                "city": donation.get("city"),
+                "pickup_deadline": donation.get("pickup_deadline"),
             },
             "request": {
                 "id": request.get("id"),
