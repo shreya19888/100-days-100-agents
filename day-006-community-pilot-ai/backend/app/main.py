@@ -79,9 +79,16 @@ async def community_requests():
     }
 @app.post("/api/voice/donation")
 async def create_voice_donation(payload: dict[str, Any]):
-    print("VAPI DONATION:", payload)
+    print("=== VAPI DONATION REQUEST ===")
+    print(payload)
 
-    tool_calls = payload.get("message", {}).get("toolCallList", [])
+    tool_calls = payload.get("message", {}).get(
+        "toolCallList",
+        [],
+    )
+
+    print("=== TOOL CALLS ===")
+    print(tool_calls)
 
     if not tool_calls:
         return {
@@ -91,29 +98,52 @@ async def create_voice_donation(payload: dict[str, Any]):
     results = []
 
     for tool_call in tool_calls:
+
         tool_call_id = tool_call.get("id")
 
-        arguments = tool_call.get("function", {}).get(
+        # Current Vapi format:
+        # toolCall["arguments"]
+        arguments = tool_call.get(
             "arguments",
             {},
         )
 
-        print("DONATION ARGUMENTS:", arguments)
+        print("=== DONATION ARGUMENTS ===")
+        print(arguments)
 
-        results.append(
-            {
-                "toolCallId": tool_call_id,
-                "result": (
-                    "Food donation information received "
-                    "successfully."
-                ),
-            }
-        )
+        try:
+            donation = create_donation(arguments)
+
+            print("=== DONATION CREATED ===")
+            print(donation)
+
+            results.append(
+                {
+                    "toolCallId": tool_call_id,
+                    "result": (
+                        "The food donation was successfully "
+                        "recorded in Community Pilot."
+                    ),
+                }
+            )
+
+        except Exception as error:
+
+            print("=== DONATION ERROR ===")
+            print(error)
+
+            results.append(
+                {
+                    "toolCallId": tool_call_id,
+                    "error": (
+                        "The food donation could not be recorded."
+                    ),
+                }
+            )
 
     return {
         "results": results
     }
-
 # -------------------------------------------------------------------
 # Dispatch orchestration
 # -------------------------------------------------------------------
