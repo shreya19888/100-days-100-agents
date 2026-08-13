@@ -117,8 +117,10 @@ async def create_voice_donation(payload: dict[str, Any]):
     for tool_call in tool_calls:
 
         tool_call_id = tool_call.get("id")
-        function_name = tool_call.get("name")
-        arguments = tool_call.get("arguments", {})
+        function = tool_call.get("function", {})
+        function_name = function.get("name")
+        arguments = function.get("arguments", {})
+
 
         print("=== TOOL CALL ID ===")
         print(tool_call_id)
