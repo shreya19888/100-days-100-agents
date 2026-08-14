@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 
-const API_URL = "https://community-pilot-ai.onrender.com";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://community-pilot-ai.onrender.com";
 
 const VAPI_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPI_PUBLIC_KEY ?? "";
 const VAPI_ASSISTANT_ID = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID ?? "";
@@ -151,7 +151,16 @@ type Intelligence = {
     last_updated?: string;
     alert_count?: number;
   };
-  coordination_signal?: { priority?: string; message?: string };
+  coordination_signal?: {
+    priority?: string;
+    message?: string;
+    headline?: string;
+    recommendation?: string;
+    rationale?: string;
+    signals_considered?: string[];
+    model?: string;
+    source?: string;
+  };
 };
 
 type VolunteerCall = {
@@ -402,6 +411,7 @@ export default function CommunityPilot() {
       if (!response.ok) return;
 
       const data: Intelligence = await response.json();
+      console.log("[Community Pilot] intelligence backend:", API_URL, data);
       setIntelligence(data);
     } catch (err) {
       console.error("Intelligence fetch failed:", err);
@@ -2579,23 +2589,7 @@ export default function CommunityPilot() {
                     Environmental signal
                   </div>
 
-                  {intelligence?.weather?.status === "not_configured" ? (
-                    <div className="mt-4">
-                      <div
-                        className="text-xl font-semibold"
-                        style={{ color: C.text }}
-                      >
-                        WeatherAPI not configured
-                      </div>
-                      <p
-                        className="mt-2 text-xs leading-5"
-                        style={{ color: C.muted }}
-                      >
-                        Add the backend WEATHER_API_KEY to activate live weather
-                        conditions.
-                      </p>
-                    </div>
-                  ) : (
+                  {intelligence?.weather?.status === "ok" ? (
                     <div className="mt-4">
                       <div className="flex items-end gap-4">
                         <div
@@ -2659,6 +2653,37 @@ export default function CommunityPilot() {
                           : "current conditions"}
                       </div>
                     </div>
+                  ) : intelligence?.weather?.status === "not_configured" ? (
+                    <div className="mt-4">
+                      <div
+                        className="text-xl font-semibold"
+                        style={{ color: C.text }}
+                      >
+                        WeatherAPI not configured
+                      </div>
+                      <p
+                        className="mt-2 text-xs leading-5"
+                        style={{ color: C.muted }}
+                      >
+                        The backend did not return live weather data. Verify
+                        WEATHER_API_KEY on the backend service.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-4">
+                      <div
+                        className="text-xl font-semibold"
+                        style={{ color: C.text }}
+                      >
+                        Weather unavailable
+                      </div>
+                      <p
+                        className="mt-2 text-xs leading-5"
+                        style={{ color: C.muted }}
+                      >
+                        The backend returned a weather status of {intelligence?.weather?.status ?? "unknown"}.
+                      </p>
+                    </div>
                   )}
                 </div>
 
@@ -2690,8 +2715,33 @@ export default function CommunityPilot() {
                     className="mt-2 text-sm leading-6"
                     style={{ color: C.muted }}
                   >
-                    {intelligence?.coordination_signal?.message ??
+                    {intelligence?.coordination_signal?.headline ??
+                      intelligence?.coordination_signal?.message ??
                       "Waiting for the coordination signal."}
+
+                  {intelligence?.coordination_signal?.recommendation && (
+                    <div
+                      className="mt-4 text-[10px] leading-5"
+                      style={{ color: C.muted }}
+                    >
+                      <span style={{ color: C.text, fontWeight: 600 }}>
+                        Recommended action: {" "}
+                      </span>
+                      {intelligence.coordination_signal.recommendation}
+                    </div>
+                  )}
+
+                  {intelligence?.coordination_signal?.model && (
+                    <div
+                      className="mt-3 text-[8px] uppercase tracking-[0.12em]"
+                      style={{
+                        color: C.faint,
+                        fontFamily: "IBM Plex Mono, monospace",
+                      }}
+                    >
+                      Intelligence · {intelligence.coordination_signal.model}
+                    </div>
+                  )}
                   </p>
 
                   <div

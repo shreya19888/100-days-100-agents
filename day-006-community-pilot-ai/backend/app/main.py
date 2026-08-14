@@ -2,8 +2,10 @@ from datetime import datetime
 from typing import Any
 import os
 import requests
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
 from app.database import supabase
 
@@ -18,6 +20,9 @@ from app.agents.routing_agent import RoutingAgent
 from app.agents.volunteer_outreach_agent import (
     VolunteerOutreachAgent,
 )
+from app.agents.community_intelligence_agent import (
+    CommunityIntelligenceAgent,
+)
 
 from app.services.data_service import (
     create_donation,
@@ -27,9 +32,9 @@ from app.services.data_service import (
     create_dispatch_assignment,
     update_dispatch_assignment,
 )
-from dotenv import load_dotenv
+
 load_dotenv()
-os.getenv("WEATHER_API_KEY")
+
 
 app = FastAPI(
     title="Community Pilot AI",
@@ -40,9 +45,10 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# -------------------------
+
+# -------------------------------------------------------------------
 # CORS
-# -------------------------
+# -------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +60,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 # -------------------------------------------------------------------
 # Health
 # -------------------------------------------------------------------
@@ -107,30 +115,6 @@ async def community_requests():
         "count": len(records),
         "requests": records,
     }
-# ================================================================
-# Community Intelligence + WeatherAPI backend update
-# ================================================================
-#
-# IMPORTANT:
-# Do NOT replace your entire main.py with this file.
-# Add the imports below near the top of your existing main.py,
-# then replace your existing /api/intelligence endpoint with the
-# endpoint below.
-#
-# Backend environment variable:
-#
-# WEATHER_API_KEY=your_weatherapi_key
-#
-# Optional:
-# WEATHER_LOCATION=San Francisco
-#
-# Render: add the same variables under the backend service's
-# Environment settings.
-# ================================================================
-
-# Add near the top of main.py
-import os
-import requests
 
 
 # -------------------------------------------------------------------
@@ -148,11 +132,11 @@ async def intelligence():
       - public homelessness snapshot
       - public shelter-system snapshot
       - current WeatherAPI conditions
-      - deterministic coordination signal
+      - OpenAI coordination intelligence
 
-    Weather and public shelter figures are explicitly labeled as
-    snapshots/conditions rather than pretending to be real-time
-    shelter vacancy data.
+    Raw operational/public facts remain deterministic.
+    OpenAI synthesizes those signals into a coordinator-facing
+    recommendation.
     """
 
     # ---------------------------------------------------------------
@@ -188,6 +172,28 @@ async def intelligence():
         except (TypeError, ValueError):
             pass
 
+    # ---------------------------------------------------------------
+    # Supply
+    # ---------------------------------------------------------------
+
+    supply = {
+        "meals_available": meals_available,
+        "donation_count": len(donations),
+    }
+
+    # ---------------------------------------------------------------
+    # Demand
+    # ---------------------------------------------------------------
+
+    demand = {
+        "meals_requested": meals_requested,
+        "request_count": len(requests_data),
+    }
+
+    # ---------------------------------------------------------------
+    # Food balance
+    # ---------------------------------------------------------------
+
     gap = meals_available - meals_requested
 
     if gap < 0:
@@ -196,6 +202,11 @@ async def intelligence():
         pressure = "MODERATE"
     else:
         pressure = "LOW"
+
+    food_balance = {
+        "gap": gap,
+        "pressure": pressure,
+    }
 
     # ---------------------------------------------------------------
     # Public San Francisco homelessness snapshot
@@ -208,11 +219,21 @@ async def intelligence():
     unsheltered_count = 4354
     sheltered_count = pit_count - unsheltered_count
 
+    community_need = {
+        "location": "San Francisco",
+        "pit_count": pit_count,
+        "unsheltered_count": unsheltered_count,
+        "sheltered_count": sheltered_count,
+        "data_year": 2024,
+        "signal": "HIGH",
+        "source": (
+            "San Francisco HSH 2024 Point-in-Time Count"
+        ),
+        "source_type": "historical_public_snapshot",
+    }
+
     # ---------------------------------------------------------------
     # Public shelter-system snapshot
-    #
-    # HSH reported 3,613 year-round beds and 90% occupancy in the
-    # 2026 public reporting snapshot.
     #
     # This is NOT real-time vacancy.
     # ---------------------------------------------------------------
@@ -233,6 +254,7 @@ async def intelligence():
     # ---------------------------------------------------------------
 
     weather_api_key = os.getenv("WEATHER_API_KEY")
+
     weather_location = os.getenv(
         "WEATHER_LOCATION",
         "San Francisco",
@@ -317,9 +339,7 @@ async def intelligence():
                 }
 
         except Exception as error:
-            print(
-                "=== WEATHER API ERROR ==="
-            )
+            print("=== WEATHER API ERROR ===")
             print(repr(error))
 
             weather = {
@@ -329,106 +349,65 @@ async def intelligence():
             }
 
     # ---------------------------------------------------------------
-    # Coordination signal
+    # OpenAI coordination intelligence
     # ---------------------------------------------------------------
 
-    priority = "MODERATE"
+    try:
+        intelligence_agent = CommunityIntelligenceAgent()
 
-    if gap < 0:
-        priority = "HIGH"
-        message = (
-            f"Recorded demand exceeds available food by "
-            f"{abs(gap)} meals. Prioritize the highest-need "
-            "community requests."
+        coordination_signal = intelligence_agent.analyze(
+            supply=supply,
+            demand=demand,
+            food_balance=food_balance,
+            community_need=community_need,
+            shelter_system=shelter_system,
+            weather=weather,
         )
 
-    elif gap > 50:
-        priority = "LOW"
-        message = (
-            f"Supply exceeds recorded demand by {gap} meals. "
-            "Focus on matching surplus efficiently while "
-            "community need remains high."
-        )
+    except Exception as error:
+        print("=== COMMUNITY INTELLIGENCE ERROR ===")
+        print(repr(error))
 
-    else:
-        message = (
-            f"Supply is available but should be allocated "
-            f"carefully against current community requests. "
-            f"Current food balance: {gap:+d} meals."
-        )
+        # Safe deterministic fallback.
+        # The dashboard continues to function if OpenAI is
+        # temporarily unavailable or not configured.
+        coordination_signal = {
+            "priority": pressure,
+            "headline": (
+                "Operational coordination signal"
+            ),
+            "recommendation": (
+                "Continue matching available food "
+                "to current community requests."
+            ),
+            "rationale": (
+                "AI coordination intelligence is "
+                "temporarily unavailable."
+            ),
+            "signals_considered": [
+                "food supply",
+                "recorded demand",
+                "community need",
+            ],
+            "model": None,
+            "source": "Community Pilot fallback",
+        }
 
-    # Weather can elevate the coordination signal without
-    # pretending the system has a medical/emergency model.
-    if weather.get("status") == "ok":
-        alert_count = weather.get(
-            "alert_count",
-            0,
-        ) or 0
-
-        temperature_f = weather.get(
-            "temperature_f"
-        )
-
-        if alert_count > 0:
-            priority = "HIGH"
-            message = (
-                "Weather alerts are active. "
-                "Prioritize nearby food movements and "
-                "reduce unnecessary volunteer travel."
-            )
-
-        elif (
-            isinstance(temperature_f, (int, float))
-            and temperature_f >= 95
-        ):
-            priority = "HIGH"
-            message = (
-                "High heat conditions are present. "
-                "Prioritize nearby destinations and "
-                "minimize volunteer travel exposure."
-            )
+    # ---------------------------------------------------------------
+    # Return intelligence payload
+    # ---------------------------------------------------------------
 
     return {
-        "supply": {
-            "meals_available": meals_available,
-            "donation_count": len(donations),
-        },
-
-        "demand": {
-            "meals_requested": meals_requested,
-            "request_count": len(requests_data),
-        },
-
-        "food_balance": {
-            "gap": gap,
-            "pressure": pressure,
-        },
-
-        "community_need": {
-            "location": "San Francisco",
-            "pit_count": pit_count,
-            "unsheltered_count": unsheltered_count,
-            "sheltered_count": sheltered_count,
-            "data_year": 2024,
-            "signal": "HIGH",
-            "source": (
-                "San Francisco HSH 2024 "
-                "Point-in-Time Count"
-            ),
-            "source_type": (
-                "historical_public_snapshot"
-            ),
-        },
-
+        "supply": supply,
+        "demand": demand,
+        "food_balance": food_balance,
+        "community_need": community_need,
         "shelter_system": shelter_system,
-
         "weather": weather,
-
-        "coordination_signal": {
-            "priority": priority,
-            "message": message,
-        },
+        "coordination_signal": coordination_signal,
     }
+
+
 # -------------------------------------------------------------------
 # Dashboard
 # -------------------------------------------------------------------
@@ -726,6 +705,7 @@ async def dashboard():
         "recent_assignments": recent_assignments,
     }
 
+
 # -------------------------------------------------------------------
 # Volunteer Call Details
 # -------------------------------------------------------------------
@@ -774,10 +754,8 @@ async def volunteer_call(call_id: str):
             "call_id": call.get("id"),
             "status": call.get("status"),
             "ended_reason": call.get("endedReason"),
-            "transcript": artifact.get("transcript") or call.get(
-                "transcript",
-                "",
-            ),
+            "transcript": artifact.get("transcript")
+            or call.get("transcript", ""),
             "messages": (
                 artifact.get("messages")
                 or call.get("messages")
@@ -796,6 +774,8 @@ async def volunteer_call(call_id: str):
             "messages": [],
             "error": str(error),
         }
+
+
 # -------------------------------------------------------------------
 # Live Activity
 # -------------------------------------------------------------------
@@ -1091,6 +1071,8 @@ async def activity():
         "count": len(events),
         "events": events[:20],
     }
+
+
 # -------------------------------------------------------------------
 # Voice AI — Food Donation Intake
 # -------------------------------------------------------------------
