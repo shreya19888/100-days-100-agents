@@ -2711,13 +2711,14 @@ export default function CommunityPilot() {
                     {intelligence?.coordination_signal?.priority ?? "PENDING"}
                   </div>
 
-                  <p
+                  <div
                     className="mt-2 text-sm leading-6"
                     style={{ color: C.muted }}
                   >
                     {intelligence?.coordination_signal?.headline ??
                       intelligence?.coordination_signal?.message ??
                       "Waiting for the coordination signal."}
+                  </div>
 
                   {intelligence?.coordination_signal?.recommendation && (
                     <div
@@ -2725,7 +2726,7 @@ export default function CommunityPilot() {
                       style={{ color: C.muted }}
                     >
                       <span style={{ color: C.text, fontWeight: 600 }}>
-                        Recommended action: {" "}
+                        Recommended action:{" "}
                       </span>
                       {intelligence.coordination_signal.recommendation}
                     </div>
@@ -2742,7 +2743,6 @@ export default function CommunityPilot() {
                       Intelligence · {intelligence.coordination_signal.model}
                     </div>
                   )}
-                  </p>
 
                   <div
                     className="mt-5 rounded-lg p-3 text-[9px] leading-4"
