@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Any
-
+import os
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -549,6 +550,77 @@ async def dashboard():
 
         "recent_assignments": recent_assignments,
     }
+
+# -------------------------------------------------------------------
+# Volunteer Call Details
+# -------------------------------------------------------------------
+
+@app.get("/api/volunteer-call/{call_id}")
+async def volunteer_call(call_id: str):
+    """
+    Return the latest Vapi call state and transcript.
+
+    The Vapi private API key stays server-side.
+    """
+
+    api_key = os.getenv("VAPI_API_KEY")
+
+    if not api_key:
+        return {
+            "status": "not_configured",
+            "call_id": call_id,
+            "transcript": "",
+            "messages": [],
+        }
+
+    try:
+        response = requests.get(
+            f"https://api.vapi.ai/call/{call_id}",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout=10,
+        )
+
+        if not response.ok:
+            return {
+                "status": "vapi_error",
+                "call_id": call_id,
+                "transcript": "",
+                "messages": [],
+                "error": response.text,
+            }
+
+        call = response.json()
+
+        artifact = call.get("artifact") or {}
+
+        return {
+            "call_id": call.get("id"),
+            "status": call.get("status"),
+            "ended_reason": call.get("endedReason"),
+            "transcript": artifact.get("transcript") or call.get(
+                "transcript",
+                "",
+            ),
+            "messages": (
+                artifact.get("messages")
+                or call.get("messages")
+                or []
+            ),
+        }
+
+    except Exception as error:
+        print("=== VOLUNTEER CALL FETCH ERROR ===")
+        print(repr(error))
+
+        return {
+            "status": "error",
+            "call_id": call_id,
+            "transcript": "",
+            "messages": [],
+            "error": str(error),
+        }
 # -------------------------------------------------------------------
 # Live Activity
 # -------------------------------------------------------------------
