@@ -5,12 +5,11 @@ from fastapi import FastAPI
 
 from app.database import supabase
 
-from fastapi import FastAPI
-
 from app.services.vapi_service import place_volunteer_call
 from app.services.calendar_service import (
     create_volunteer_calendar_event,
 )
+
 from app.agents.coordinator import CoordinatorAgent
 from app.agents.matching_agent import MatchingAgent
 from app.agents.routing_agent import RoutingAgent
@@ -393,6 +392,7 @@ async def dispatch():
 # -------------------------------------------------------------------
 # Volunteer Outreach
 # -------------------------------------------------------------------
+
 @app.post("/api/dispatch/outreach")
 async def dispatch_outreach():
 
@@ -661,6 +661,7 @@ async def dispatch_outreach():
         },
     }
 
+
 # -------------------------------------------------------------------
 # Test outbound call
 # -------------------------------------------------------------------
@@ -696,6 +697,7 @@ async def test_call():
         "vapi": result,
     }
 
+
 # -------------------------------------------------------------------
 # Place volunteer call for a specific dispatch assignment
 # -------------------------------------------------------------------
@@ -714,19 +716,20 @@ async def call_volunteer_for_assignment(
         .table("Dispatch Assignment")
         .select("*")
         .eq("id", assignment_id)
-        .single()
+        .limit(1)
         .execute()
     )
 
-    assignment = response.data
-
-    if not assignment:
+    if not response.data:
         return {
             "status": "assignment_not_found",
             "message": (
                 "The dispatch assignment could not be found."
             ),
+            "assignment_id": assignment_id,
         }
+
+    assignment = response.data[0]
 
     # ---------------------------------------------------------------
     # 2. Prevent duplicate calls
@@ -751,17 +754,18 @@ async def call_volunteer_for_assignment(
             "whalesync_postgres_id",
             assignment["volunteer_id"],
         )
-        .single()
+        .limit(1)
         .execute()
     )
 
-    volunteer_row = volunteer_response.data
-
-    if not volunteer_row:
+    if not volunteer_response.data:
         return {
             "status": "volunteer_not_found",
             "assignment_id": assignment_id,
+            "volunteer_id": assignment["volunteer_id"],
         }
+
+    volunteer_row = volunteer_response.data[0]
 
     # ---------------------------------------------------------------
     # 4. Normalize volunteer
@@ -898,9 +902,12 @@ async def call_volunteer_for_assignment(
         },
         "vapi": vapi_response,
     }
+
+
 # -------------------------------------------------------------------
 # Volunteer response webhook
 # -------------------------------------------------------------------
+
 @app.post("/api/voice/volunteer-response")
 async def volunteer_response(
     payload: dict[str, Any],
@@ -1220,14 +1227,4 @@ async def volunteer_response(
             "calendar_event_url"
         ),
         "transcript": transcript,
-    }
-
-    # ---------------------------------------------------------------
-    # Other Vapi events
-    # ---------------------------------------------------------------
-
-    print("=== NON END-OF-CALL EVENT ===")
-
-    return {
-        "status": "received",
     }
