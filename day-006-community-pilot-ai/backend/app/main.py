@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import supabase
 
@@ -36,7 +37,20 @@ app = FastAPI(
     version="0.2.0",
 )
 
+# -------------------------------------------------------------------
+# CORS
+# -------------------------------------------------------------------
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # -------------------------------------------------------------------
 # Health
 # -------------------------------------------------------------------
@@ -91,7 +105,303 @@ async def community_requests():
         "requests": records,
     }
 
+# -------------------------------------------------------------------
+# Dashboard
+# -------------------------------------------------------------------
 
+@app.get("/api/dashboard")
+async def dashboard():
+    """
+    Return the data needed by the Community Pilot dashboard.
+
+    The dashboard combines:
+        Food Donation
+        Food Request
+        Volunteer Signup
+        Dispatch Assignment
+
+    into a single frontend-friendly payload.
+    """
+
+    # ---------------------------------------------------------------
+    # Fetch core tables
+    # ---------------------------------------------------------------
+
+    donations_response = (
+        supabase
+        .table("Food Donation")
+        .select("*")
+        .execute()
+    )
+
+    requests_response = (
+        supabase
+        .table("Food Request")
+        .select("*")
+        .execute()
+    )
+
+    volunteers_response = (
+        supabase
+        .table("Volunteer Signup")
+        .select("*")
+        .execute()
+    )
+
+    assignments_response = (
+        supabase
+        .table("Dispatch Assignment")
+        .select("*")
+        .execute()
+    )
+
+    donations = donations_response.data or []
+    requests = requests_response.data or []
+    volunteers = volunteers_response.data or []
+    assignments = assignments_response.data or []
+
+    # ---------------------------------------------------------------
+    # Build lookup dictionaries
+    # ---------------------------------------------------------------
+
+    donation_lookup = {
+        str(donation.get("whalesync_postgres_id")): donation
+        for donation in donations
+        if donation.get("whalesync_postgres_id")
+    }
+
+    request_lookup = {
+        str(request.get("whalesync_postgres_id")): request
+        for request in requests
+        if request.get("whalesync_postgres_id")
+    }
+
+    volunteer_lookup = {
+        str(volunteer.get("whalesync_postgres_id")): volunteer
+        for volunteer in volunteers
+        if volunteer.get("whalesync_postgres_id")
+    }
+
+    # ---------------------------------------------------------------
+    # Calculate impact
+    # ---------------------------------------------------------------
+
+    meals_rescued = 0
+
+    for donation in donations:
+        value = donation.get(
+            "approximately_how_many_meals_or_servings_are_available",
+            0,
+        )
+
+        try:
+            meals_rescued += int(value)
+        except (TypeError, ValueError):
+            pass
+
+    meals_delivered = sum(
+        assignment.get("meals_assigned", 0) or 0
+        for assignment in assignments
+        if assignment.get("status") in [
+            "delivered",
+            "completed",
+        ]
+    )
+
+    active_dispatches = sum(
+        1
+        for assignment in assignments
+        if assignment.get("status") not in [
+            "delivered",
+            "completed",
+            "cancelled",
+        ]
+    )
+
+    # ---------------------------------------------------------------
+    # Enrich dispatch assignments
+    # ---------------------------------------------------------------
+
+    enriched_assignments = []
+
+    for assignment in assignments:
+
+        donation_id = str(
+            assignment.get("donation_id") or ""
+        )
+
+        request_id = str(
+            assignment.get("request_id") or ""
+        )
+
+        volunteer_id = str(
+            assignment.get("volunteer_id") or ""
+        )
+
+        donation = donation_lookup.get(
+            donation_id
+        )
+
+        request = request_lookup.get(
+            request_id
+        )
+
+        volunteer = volunteer_lookup.get(
+            volunteer_id
+        )
+
+        # -----------------------------------------------------------
+        # Donor information
+        # -----------------------------------------------------------
+
+        donor_name = None
+        donor_contact = None
+
+        if donation:
+            donor_name = donation.get(
+                "restaurant_business_name"
+            )
+
+            donor_contact = donation.get(
+                "contact_name"
+            )
+
+        # -----------------------------------------------------------
+        # Recipient information
+        # -----------------------------------------------------------
+
+        recipient_name = None
+        recipient_contact = None
+
+        if request:
+            recipient_name = request.get(
+                "organization_name"
+            )
+
+            recipient_contact = request.get(
+                "contact_name"
+            )
+
+        # -----------------------------------------------------------
+        # Volunteer information
+        # -----------------------------------------------------------
+
+        volunteer_name = None
+        volunteer_email = None
+        volunteer_phone = None
+
+        if volunteer:
+            volunteer_name = volunteer.get(
+                "full_name"
+            )
+
+            volunteer_email = volunteer.get(
+                "email"
+            )
+
+            volunteer_phone = volunteer.get(
+                "phone_number"
+            )
+
+        # -----------------------------------------------------------
+        # Build frontend-friendly assignment
+        # -----------------------------------------------------------
+
+        enriched_assignment = {
+            **assignment,
+
+            "donor": {
+                "name": donor_name,
+                "contact": donor_contact,
+            },
+
+            "recipient": {
+                "name": recipient_name,
+                "contact": recipient_contact,
+            },
+
+            "volunteer": {
+                "name": volunteer_name,
+                "email": volunteer_email,
+                "phone": volunteer_phone,
+            },
+
+            "workflow": {
+                "form_submitted": bool(
+                    assignment.get("donation_id")
+                ),
+
+                "donation_logged": bool(
+                    donation
+                ),
+
+                "match_found": bool(
+                    assignment.get("id")
+                ),
+
+                "ai_call_placed": bool(
+                    assignment.get("vapi_call_id")
+                ),
+
+                "pickup_confirmed": (
+                    assignment.get(
+                        "volunteer_outcome"
+                    )
+                    == "accepted"
+                ),
+
+                "delivery_scheduled": bool(
+                    assignment.get(
+                        "calendar_event_id"
+                    )
+                ),
+
+                "delivery_completed": (
+                    assignment.get("status")
+                    in [
+                        "delivered",
+                        "completed",
+                    ]
+                ),
+            },
+        }
+
+        enriched_assignments.append(
+            enriched_assignment
+        )
+
+    # ---------------------------------------------------------------
+    # Sort newest assignments first
+    # ---------------------------------------------------------------
+
+    recent_assignments = sorted(
+        enriched_assignments,
+        key=lambda x: x.get("updated_at") or "",
+        reverse=True,
+    )[:10]
+
+    # ---------------------------------------------------------------
+    # Return dashboard payload
+    # ---------------------------------------------------------------
+
+    return {
+        "stats": {
+            "meals_rescued": meals_rescued,
+            "meals_delivered": meals_delivered,
+            "active_dispatches": active_dispatches,
+            "volunteers": len(volunteers),
+        },
+
+        "counts": {
+            "donations": len(donations),
+            "requests": len(requests),
+            "volunteers": len(volunteers),
+            "assignments": len(assignments),
+        },
+
+        "recent_assignments": recent_assignments,
+    }
+   
 # -------------------------------------------------------------------
 # Voice AI — Food Donation Intake
 # -------------------------------------------------------------------
