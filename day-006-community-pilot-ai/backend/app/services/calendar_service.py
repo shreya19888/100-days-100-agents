@@ -4,7 +4,6 @@ from typing import Any
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 
@@ -13,164 +12,59 @@ SCOPES = [
 ]
 
 
-# -------------------------------------------------------------------
-# File locations
-# -------------------------------------------------------------------
-
-BASE_DIR = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    )
-)
-
-# -------------------------------------------------------------------
-# Google credential locations
-# -------------------------------------------------------------------
-
-RENDER_CREDENTIALS_FILE = "/etc/secrets/credentials.json"
-RENDER_TOKEN_FILE = "/etc/secrets/token.json"
-
-LOCAL_CREDENTIALS_FILE = os.path.join(
-    BASE_DIR,
-    "credentials.json",
-)
-
-LOCAL_TOKEN_FILE = os.path.join(
-    BASE_DIR,
-    "token.json",
-)
-
-CREDENTIALS_FILE = (
-    RENDER_CREDENTIALS_FILE
-    if os.path.exists(RENDER_CREDENTIALS_FILE)
-    else LOCAL_CREDENTIALS_FILE
-)
-
-TOKEN_FILE = (
-    RENDER_TOKEN_FILE
-    if os.path.exists(RENDER_TOKEN_FILE)
-    else LOCAL_TOKEN_FILE
-)
-
-# -------------------------------------------------------------------
-# Google Calendar authentication
-# -------------------------------------------------------------------
-
 def get_calendar_service():
-    """Authenticate and return a Google Calendar service."""
+    """
+    Authenticate with Google Calendar using OAuth credentials
+    stored in environment variables.
 
-    creds = None
+    This is designed for production environments such as Render,
+    where we don't want to depend on local credentials.json/token.json
+    files.
+    """
 
-    # ---------------------------------------------------------------
-    # Load existing token
-    # ---------------------------------------------------------------
-
-    if os.path.exists(TOKEN_FILE):
-
-        creds = (
-            Credentials.from_authorized_user_file(
-                TOKEN_FILE,
-                SCOPES,
-            )
-        )
-
-    # ---------------------------------------------------------------
-    # Refresh existing credentials
-    # ---------------------------------------------------------------
-
-    if (
-        creds
-        and creds.expired
-        and creds.refresh_token
-    ):
-
-        creds.refresh(
-            Request()
-        )
-
-        # Save refreshed token when possible
-        try:
-
-            with open(
-                TOKEN_FILE,
-                "w",
-            ) as token:
-
-                token.write(
-                    creds.to_json()
-                )
-
-        except OSError:
-
-            # Render secret files may be read-only.
-            pass
-
-    # ---------------------------------------------------------------
-    # Valid credentials
-    # ---------------------------------------------------------------
-
-    if creds and creds.valid:
-
-        return build(
-            "calendar",
-            "v3",
-            credentials=creds,
-        )
-
-    # ---------------------------------------------------------------
-    # No valid credentials
-    # ---------------------------------------------------------------
-
-    raise RuntimeError(
-        "Google Calendar authentication is not available. "
-        "Make sure credentials.json and token.json "
-        "are configured."
+    client_id = os.getenv("client_id")
+    client_secret = os.getenv("client_secret")
+    token = os.getenv("token")
+    refresh_token = os.getenv("refresh_token")
+    token_uri = os.getenv(
+        "token_uri",
+        "https://oauth2.googleapis.com/token",
     )
-    # ---------------------------------------------------------------
-    # Refresh or create credentials
-    # ---------------------------------------------------------------
 
-    if not creds or not creds.valid:
+    if not client_id:
+        raise RuntimeError(
+            "Google Calendar client_id is not configured."
+        )
 
-        if (
-            creds
-            and creds.expired
-            and creds.refresh_token
-        ):
+    if not client_secret:
+        raise RuntimeError(
+            "Google Calendar client_secret is not configured."
+        )
 
-            creds.refresh(
-                Request()
-            )
+    if not refresh_token:
+        raise RuntimeError(
+            "Google Calendar refresh_token is not configured."
+        )
+
+    creds = Credentials(
+        token=token,
+        refresh_token=refresh_token,
+        token_uri=token_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=SCOPES,
+    )
+
+    # Refresh the access token if necessary.
+    if not creds.valid:
+
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
 
         else:
-
-            flow = (
-                InstalledAppFlow
-                .from_client_secrets_file(
-                    CREDENTIALS_FILE,
-                    SCOPES,
-                )
+            raise RuntimeError(
+                "Google Calendar authentication could not be refreshed."
             )
-
-            creds = flow.run_local_server(
-                port=0
-            )
-
-        # Save refreshed/new credentials
-        with open(
-            TOKEN_FILE,
-            "w",
-        ) as token:
-
-            token.write(
-                creds.to_json()
-            )
-
-    # ---------------------------------------------------------------
-    # Build Calendar API client
-    # ---------------------------------------------------------------
 
     return build(
         "calendar",
@@ -179,24 +73,12 @@ def get_calendar_service():
     )
 
 
-# -------------------------------------------------------------------
-# Calendar event creation
-# -------------------------------------------------------------------
-
 def create_volunteer_calendar_event(
     volunteer: dict[str, Any],
     assignment: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Create a Google Calendar event for an accepted
-    Community Pilot volunteer assignment.
-    """
 
     service = get_calendar_service()
-
-    # ---------------------------------------------------------------
-    # Volunteer information
-    # ---------------------------------------------------------------
 
     volunteer_name = volunteer.get(
         "name",
@@ -206,10 +88,6 @@ def create_volunteer_calendar_event(
     volunteer_email = volunteer.get(
         "email"
     )
-
-    # ---------------------------------------------------------------
-    # Assignment information
-    # ---------------------------------------------------------------
 
     meals = assignment.get(
         "meals_assigned",
@@ -226,7 +104,7 @@ def create_volunteer_calendar_event(
         "",
     )
 
-    pickup_deadline_text = assignment.get(
+    pickup_deadline = assignment.get(
         "pickup_deadline",
         "",
     )
@@ -252,59 +130,22 @@ def create_volunteer_calendar_event(
     )
 
     # ---------------------------------------------------------------
-    # Validate pickup deadline
+    # Demo event timing
     # ---------------------------------------------------------------
-
-    if not pickup_deadline_text:
-
-        raise ValueError(
-            "Assignment is missing pickup_deadline."
-        )
-
-    # ---------------------------------------------------------------
-    # Parse pickup deadline
-    # ---------------------------------------------------------------
-
-    try:
-
-        pickup_deadline = datetime.strptime(
-            pickup_deadline_text,
-            "%m/%d/%Y %H:%M:%S",
-        )
-
-    except ValueError:
-
-        try:
-
-            pickup_deadline = datetime.strptime(
-                pickup_deadline_text,
-                "%m/%d/%Y %H:%M",
-            )
-
-        except ValueError as exc:
-
-            raise ValueError(
-                "Invalid pickup_deadline format: "
-                f"{pickup_deadline_text}"
-            ) from exc
-
-    # ---------------------------------------------------------------
-    # Calendar timing
     #
-    # The calendar block ends at the pickup deadline.
-    # We use a one-hour window leading up to that deadline.
-    # ---------------------------------------------------------------
+    # For now we use a one-hour delivery window.
+    # We'll make this smarter later.
+    #
 
-    end_time = pickup_deadline
+    now = datetime.now()
 
-    start_time = (
-        pickup_deadline
-        - timedelta(hours=1)
+    start_time = now + timedelta(
+        minutes=15
     )
 
-    # ---------------------------------------------------------------
-    # Build event
-    # ---------------------------------------------------------------
+    end_time = start_time + timedelta(
+        hours=1
+    )
 
     event = {
         "summary": (
@@ -327,7 +168,7 @@ PICKUP
 {pickup_city}
 
 Pickup deadline:
-{pickup_deadline_text}
+{pickup_deadline}
 
 DELIVERY
 {delivery_organization}
@@ -342,38 +183,25 @@ to the community!
 """.strip(),
 
         "start": {
-            "dateTime": (
-                start_time.isoformat()
-            ),
+            "dateTime": start_time.isoformat(),
             "timeZone": "America/Los_Angeles",
         },
 
         "end": {
-            "dateTime": (
-                end_time.isoformat()
-            ),
+            "dateTime": end_time.isoformat(),
             "timeZone": "America/Los_Angeles",
         },
 
         "attendees": [],
     }
 
-    # ---------------------------------------------------------------
-    # Add volunteer as attendee
-    # ---------------------------------------------------------------
-
     if volunteer_email:
-
         event["attendees"] = [
             {
                 "email": volunteer_email,
                 "displayName": volunteer_name,
             }
         ]
-
-    # ---------------------------------------------------------------
-    # Create Google Calendar event
-    # ---------------------------------------------------------------
 
     created_event = (
         service.events()
@@ -384,10 +212,6 @@ to the community!
         )
         .execute()
     )
-
-    # ---------------------------------------------------------------
-    # Log result
-    # ---------------------------------------------------------------
 
     print(
         "=== GOOGLE CALENDAR EVENT CREATED ==="
