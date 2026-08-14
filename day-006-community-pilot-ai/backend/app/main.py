@@ -104,7 +104,155 @@ async def community_requests():
         "count": len(records),
         "requests": records,
     }
+# -------------------------------------------------------------------
+# Community Intelligence
+# -------------------------------------------------------------------
 
+@app.get("/api/intelligence")
+async def community_intelligence():
+    """
+    Return community-level signals for the coordinator.
+
+    This first version uses live Supabase data for supply/demand
+    and a clearly labeled public community-need signal.
+    External weather data will be added next.
+    """
+
+    # ---------------------------------------------------------------
+    # Fetch food supply
+    # ---------------------------------------------------------------
+
+    donations_response = (
+        supabase
+        .table("Food Donation")
+        .select(
+            "whalesync_postgres_id,"
+            "approximately_how_many_meals_or_servings_are_available,"
+            "city"
+        )
+        .execute()
+    )
+
+    donations = donations_response.data or []
+
+    meals_available = 0
+
+    for donation in donations:
+        value = donation.get(
+            "approximately_how_many_meals_or_servings_are_available",
+            0,
+        )
+
+        try:
+            meals_available += int(value)
+        except (TypeError, ValueError):
+            pass
+
+    # ---------------------------------------------------------------
+    # Fetch food demand
+    # ---------------------------------------------------------------
+
+    requests_response = (
+        supabase
+        .table("Food Request")
+        .select(
+            "whalesync_postgres_id,"
+            "how_many_meals_are_currently_needed,"
+            "city"
+        )
+        .execute()
+    )
+
+    requests = requests_response.data or []
+
+    meals_requested = 0
+
+    for request in requests:
+        value = request.get(
+            "how_many_meals_are_currently_needed",
+            0,
+        )
+
+        try:
+            meals_requested += int(value)
+        except (TypeError, ValueError):
+            pass
+
+    # ---------------------------------------------------------------
+    # Supply / demand signal
+    # ---------------------------------------------------------------
+
+    supply_gap = meals_available - meals_requested
+
+    if supply_gap < 0:
+        pressure = "HIGH"
+    elif supply_gap < max(25, meals_requested * 0.20):
+        pressure = "MODERATE"
+    else:
+        pressure = "LOW"
+
+    # ---------------------------------------------------------------
+    # Community need signal
+    #
+    # IMPORTANT:
+    # This is a public historical snapshot, not live population data.
+    # ---------------------------------------------------------------
+
+    community_need = {
+        "location": "San Francisco",
+        "pit_count": 8323,
+        "unsheltered_count": 4354,
+        "data_year": 2024,
+        "signal": "HIGH",
+        "source": "San Francisco HSH 2024 Point-in-Time Count",
+        "source_type": "historical_public_snapshot",
+    }
+
+    # ---------------------------------------------------------------
+    # Coordinator signal
+    # ---------------------------------------------------------------
+
+    if pressure == "HIGH":
+        coordination_signal = (
+            "Demand currently exceeds available surplus food. "
+            "Prioritize high-urgency requests and minimize "
+            "pickup distance where possible."
+        )
+    elif pressure == "MODERATE":
+        coordination_signal = (
+            "Supply is available but should be allocated carefully "
+            "against current community requests."
+        )
+    else:
+        coordination_signal = (
+            "Available surplus currently exceeds recorded demand. "
+            "Continue matching donations to the highest-priority "
+            "community requests."
+        )
+
+    return {
+        "supply": {
+            "meals_available": meals_available,
+            "donation_count": len(donations),
+        },
+        "demand": {
+            "meals_requested": meals_requested,
+            "request_count": len(requests),
+        },
+        "food_balance": {
+            "gap": supply_gap,
+            "pressure": pressure,
+        },
+        "community_need": community_need,
+        "weather": {
+            "status": "not_configured",
+            "location": "San Jose",
+        },
+        "coordination_signal": {
+            "priority": pressure,
+            "message": coordination_signal,
+        },
+    }
 # -------------------------------------------------------------------
 # Dashboard
 # -------------------------------------------------------------------
@@ -401,7 +549,301 @@ async def dashboard():
 
         "recent_assignments": recent_assignments,
     }
-   
+# -------------------------------------------------------------------
+# Live Activity
+# -------------------------------------------------------------------
+
+@app.get("/api/activity")
+async def activity():
+    """
+    Return recent real workflow events for the dashboard.
+
+    Events are derived from the current Dispatch Assignment
+    records, so the frontend can poll this endpoint and show
+    what Community Pilot has actually completed.
+    """
+
+    # ---------------------------------------------------------------
+    # Fetch assignments
+    # ---------------------------------------------------------------
+
+    assignments_response = (
+        supabase
+        .table("Dispatch Assignment")
+        .select("*")
+        .execute()
+    )
+
+    assignments = assignments_response.data or []
+
+    # ---------------------------------------------------------------
+    # Fetch related records
+    # ---------------------------------------------------------------
+
+    donations_response = (
+        supabase
+        .table("Food Donation")
+        .select("*")
+        .execute()
+    )
+
+    donations = donations_response.data or []
+
+    volunteers_response = (
+        supabase
+        .table("Volunteer Signup")
+        .select("*")
+        .execute()
+    )
+
+    volunteers = volunteers_response.data or []
+
+    # ---------------------------------------------------------------
+    # Build lookups
+    # ---------------------------------------------------------------
+
+    donation_lookup = {
+        str(donation.get("whalesync_postgres_id")): donation
+        for donation in donations
+        if donation.get("whalesync_postgres_id")
+    }
+
+    volunteer_lookup = {
+        str(volunteer.get("whalesync_postgres_id")): volunteer
+        for volunteer in volunteers
+        if volunteer.get("whalesync_postgres_id")
+    }
+
+    # ---------------------------------------------------------------
+    # Build activity events
+    # ---------------------------------------------------------------
+
+    events = []
+
+    for assignment in assignments:
+
+        assignment_id = assignment.get("id")
+
+        donation = donation_lookup.get(
+            str(assignment.get("donation_id"))
+        )
+
+        volunteer = volunteer_lookup.get(
+            str(assignment.get("volunteer_id"))
+        )
+
+        donor_name = (
+            donation.get("restaurant_business_name")
+            if donation
+            else "Food donor"
+        )
+
+        volunteer_name = (
+            volunteer.get("full_name")
+            if volunteer
+            else "Volunteer"
+        )
+
+        meals = assignment.get(
+            "meals_assigned",
+            0,
+        )
+
+        created_at = (
+            assignment.get("created_at")
+            or assignment.get("updated_at")
+        )
+
+        updated_at = (
+            assignment.get("updated_at")
+            or created_at
+        )
+
+        # -----------------------------------------------------------
+        # Donation received
+        # -----------------------------------------------------------
+
+        if assignment.get("donation_id"):
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-donation",
+                    "assignment_id": assignment_id,
+                    "type": "donation",
+                    "icon": "database",
+                    "title": "Donation received",
+                    "description": (
+                        f"{donor_name} · "
+                        f"{meals} meals logged"
+                    ),
+                    "timestamp": created_at,
+                    "status": "complete",
+                }
+            )
+
+        # -----------------------------------------------------------
+        # AI match
+        # -----------------------------------------------------------
+
+        if assignment.get("id"):
+
+            destination = (
+                assignment.get(
+                    "delivery_organization"
+                )
+                or "Community destination"
+            )
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-match",
+                    "assignment_id": assignment_id,
+                    "type": "match",
+                    "icon": "sparkles",
+                    "title": "AI match found",
+                    "description": (
+                        f"{meals} meals matched → "
+                        f"{destination}"
+                    ),
+                    "timestamp": created_at,
+                    "status": "complete",
+                }
+            )
+
+        # -----------------------------------------------------------
+        # Volunteer AI call
+        # -----------------------------------------------------------
+
+        if assignment.get("vapi_call_id"):
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-call",
+                    "assignment_id": assignment_id,
+                    "type": "call",
+                    "icon": "phone",
+                    "title": "AI volunteer call connected",
+                    "description": (
+                        f"Community Pilot contacted "
+                        f"{volunteer_name}"
+                    ),
+                    "timestamp": updated_at,
+                    "status": "complete",
+                }
+            )
+
+        # -----------------------------------------------------------
+        # Volunteer response
+        # -----------------------------------------------------------
+
+        outcome = assignment.get(
+            "volunteer_outcome"
+        )
+
+        if outcome == "accepted":
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-accepted",
+                    "assignment_id": assignment_id,
+                    "type": "accepted",
+                    "icon": "check",
+                    "title": "Volunteer accepted",
+                    "description": (
+                        f"{volunteer_name} confirmed "
+                        f"the assignment"
+                    ),
+                    "timestamp": updated_at,
+                    "status": "complete",
+                }
+            )
+
+        elif outcome == "declined":
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-declined",
+                    "assignment_id": assignment_id,
+                    "type": "declined",
+                    "icon": "x",
+                    "title": "Volunteer declined",
+                    "description": (
+                        f"{volunteer_name} declined "
+                        f"the assignment"
+                    ),
+                    "timestamp": updated_at,
+                    "status": "declined",
+                }
+            )
+
+        # -----------------------------------------------------------
+        # Calendar event
+        # -----------------------------------------------------------
+
+        if assignment.get("calendar_event_id"):
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-calendar",
+                    "assignment_id": assignment_id,
+                    "type": "calendar",
+                    "icon": "calendar",
+                    "title": "Calendar event created",
+                    "description": (
+                        f"Pickup scheduled for "
+                        f"{donor_name}"
+                    ),
+                    "timestamp": updated_at,
+                    "status": "complete",
+                }
+            )
+
+        # -----------------------------------------------------------
+        # Delivery
+        # -----------------------------------------------------------
+
+        if assignment.get("status") in [
+            "delivered",
+            "completed",
+        ]:
+
+            destination = (
+                assignment.get(
+                    "delivery_organization"
+                )
+                or "Community destination"
+            )
+
+            events.append(
+                {
+                    "id": f"{assignment_id}-delivery",
+                    "assignment_id": assignment_id,
+                    "type": "delivery",
+                    "icon": "truck",
+                    "title": "Delivery completed",
+                    "description": (
+                        f"{meals} meals delivered → "
+                        f"{destination}"
+                    ),
+                    "timestamp": updated_at,
+                    "status": "complete",
+                }
+            )
+
+    # ---------------------------------------------------------------
+    # Sort newest first
+    # ---------------------------------------------------------------
+
+    events = sorted(
+        events,
+        key=lambda event: event.get("timestamp") or "",
+        reverse=True,
+    )
+
+    return {
+        "count": len(events),
+        "events": events[:20],
+    }
 # -------------------------------------------------------------------
 # Voice AI — Food Donation Intake
 # -------------------------------------------------------------------
