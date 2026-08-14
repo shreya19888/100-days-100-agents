@@ -25,16 +25,34 @@ BASE_DIR = os.path.dirname(
     )
 )
 
-CREDENTIALS_FILE = os.path.join(
+# -------------------------------------------------------------------
+# Google credential locations
+# -------------------------------------------------------------------
+
+RENDER_CREDENTIALS_FILE = "/etc/secrets/credentials.json"
+RENDER_TOKEN_FILE = "/etc/secrets/token.json"
+
+LOCAL_CREDENTIALS_FILE = os.path.join(
     BASE_DIR,
     "credentials.json",
 )
 
-TOKEN_FILE = os.path.join(
+LOCAL_TOKEN_FILE = os.path.join(
     BASE_DIR,
     "token.json",
 )
 
+CREDENTIALS_FILE = (
+    RENDER_CREDENTIALS_FILE
+    if os.path.exists(RENDER_CREDENTIALS_FILE)
+    else LOCAL_CREDENTIALS_FILE
+)
+
+TOKEN_FILE = (
+    RENDER_TOKEN_FILE
+    if os.path.exists(RENDER_TOKEN_FILE)
+    else LOCAL_TOKEN_FILE
+)
 
 # -------------------------------------------------------------------
 # Google Calendar authentication
@@ -58,6 +76,58 @@ def get_calendar_service():
             )
         )
 
+    # ---------------------------------------------------------------
+    # Refresh existing credentials
+    # ---------------------------------------------------------------
+
+    if (
+        creds
+        and creds.expired
+        and creds.refresh_token
+    ):
+
+        creds.refresh(
+            Request()
+        )
+
+        # Save refreshed token when possible
+        try:
+
+            with open(
+                TOKEN_FILE,
+                "w",
+            ) as token:
+
+                token.write(
+                    creds.to_json()
+                )
+
+        except OSError:
+
+            # Render secret files may be read-only.
+            pass
+
+    # ---------------------------------------------------------------
+    # Valid credentials
+    # ---------------------------------------------------------------
+
+    if creds and creds.valid:
+
+        return build(
+            "calendar",
+            "v3",
+            credentials=creds,
+        )
+
+    # ---------------------------------------------------------------
+    # No valid credentials
+    # ---------------------------------------------------------------
+
+    raise RuntimeError(
+        "Google Calendar authentication is not available. "
+        "Make sure credentials.json and token.json "
+        "are configured."
+    )
     # ---------------------------------------------------------------
     # Refresh or create credentials
     # ---------------------------------------------------------------
