@@ -27,7 +27,9 @@ from app.services.data_service import (
     create_dispatch_assignment,
     update_dispatch_assignment,
 )
-
+from dotenv import load_dotenv
+load_dotenv()
+os.getenv("WEATHER_API_KEY")
 
 app = FastAPI(
     title="Community Pilot AI",
@@ -105,153 +107,326 @@ async def community_requests():
         "count": len(records),
         "requests": records,
     }
+# ================================================================
+# Community Intelligence + WeatherAPI backend update
+# ================================================================
+#
+# IMPORTANT:
+# Do NOT replace your entire main.py with this file.
+# Add the imports below near the top of your existing main.py,
+# then replace your existing /api/intelligence endpoint with the
+# endpoint below.
+#
+# Backend environment variable:
+#
+# WEATHER_API_KEY=your_weatherapi_key
+#
+# Optional:
+# WEATHER_LOCATION=San Francisco
+#
+# Render: add the same variables under the backend service's
+# Environment settings.
+# ================================================================
+
+# Add near the top of main.py
+import os
+import requests
+
+
 # -------------------------------------------------------------------
 # Community Intelligence
 # -------------------------------------------------------------------
 
 @app.get("/api/intelligence")
-async def community_intelligence():
+async def intelligence():
     """
-    Return community-level signals for the coordinator.
+    Coordination context for Community Pilot.
 
-    This first version uses live Supabase data for supply/demand
-    and a clearly labeled public community-need signal.
-    External weather data will be added next.
+    Combines:
+      - live food supply
+      - live recorded demand
+      - public homelessness snapshot
+      - public shelter-system snapshot
+      - current WeatherAPI conditions
+      - deterministic coordination signal
+
+    Weather and public shelter figures are explicitly labeled as
+    snapshots/conditions rather than pretending to be real-time
+    shelter vacancy data.
     """
 
     # ---------------------------------------------------------------
-    # Fetch food supply
+    # Live Community Pilot food data
     # ---------------------------------------------------------------
 
-    donations_response = (
-        supabase
-        .table("Food Donation")
-        .select(
-            "whalesync_postgres_id,"
-            "approximately_how_many_meals_or_servings_are_available,"
-            "city"
-        )
-        .execute()
-    )
-
-    donations = donations_response.data or []
+    donations = get_donations()
+    requests_data = get_community_requests()
 
     meals_available = 0
 
     for donation in donations:
         value = donation.get(
             "approximately_how_many_meals_or_servings_are_available",
-            0,
+            donation.get("meals", 0),
         )
 
         try:
-            meals_available += int(value)
+            meals_available += int(value or 0)
         except (TypeError, ValueError):
             pass
-
-    # ---------------------------------------------------------------
-    # Fetch food demand
-    # ---------------------------------------------------------------
-
-    requests_response = (
-        supabase
-        .table("Food Request")
-        .select(
-            "whalesync_postgres_id,"
-            "how_many_meals_are_currently_needed,"
-            "city"
-        )
-        .execute()
-    )
-
-    requests = requests_response.data or []
 
     meals_requested = 0
 
-    for request in requests:
+    for request in requests_data:
         value = request.get(
-            "how_many_meals_are_currently_needed",
-            0,
+            "approximately_how_many_meals_are_needed",
+            request.get("meals", 0),
         )
 
         try:
-            meals_requested += int(value)
+            meals_requested += int(value or 0)
         except (TypeError, ValueError):
             pass
 
-    # ---------------------------------------------------------------
-    # Supply / demand signal
-    # ---------------------------------------------------------------
+    gap = meals_available - meals_requested
 
-    supply_gap = meals_available - meals_requested
-
-    if supply_gap < 0:
+    if gap < 0:
         pressure = "HIGH"
-    elif supply_gap < max(25, meals_requested * 0.20):
+    elif gap <= 50:
         pressure = "MODERATE"
     else:
         pressure = "LOW"
 
     # ---------------------------------------------------------------
-    # Community need signal
+    # Public San Francisco homelessness snapshot
     #
-    # IMPORTANT:
-    # This is a public historical snapshot, not live population data.
+    # Existing Community Pilot source:
+    # 2024 SF HSH Point-in-Time Count
     # ---------------------------------------------------------------
 
-    community_need = {
-        "location": "San Francisco",
-        "pit_count": 8323,
-        "unsheltered_count": 4354,
-        "data_year": 2024,
-        "signal": "HIGH",
-        "source": "San Francisco HSH 2024 Point-in-Time Count",
+    pit_count = 8323
+    unsheltered_count = 4354
+    sheltered_count = pit_count - unsheltered_count
+
+    # ---------------------------------------------------------------
+    # Public shelter-system snapshot
+    #
+    # HSH reported 3,613 year-round beds and 90% occupancy in the
+    # 2026 public reporting snapshot.
+    #
+    # This is NOT real-time vacancy.
+    # ---------------------------------------------------------------
+
+    shelter_system = {
+        "year_round_beds": 3613,
+        "occupancy_rate": 90,
+        "snapshot_date": "2026-04-30",
+        "source": (
+            "San Francisco HSH / Homelessness Oversight Commission "
+            "public shelter-system reporting"
+        ),
         "source_type": "historical_public_snapshot",
     }
 
     # ---------------------------------------------------------------
-    # Coordinator signal
+    # WeatherAPI
     # ---------------------------------------------------------------
 
-    if pressure == "HIGH":
-        coordination_signal = (
-            "Demand currently exceeds available surplus food. "
-            "Prioritize high-urgency requests and minimize "
-            "pickup distance where possible."
-        )
-    elif pressure == "MODERATE":
-        coordination_signal = (
-            "Supply is available but should be allocated carefully "
-            "against current community requests."
-        )
-    else:
-        coordination_signal = (
-            "Available surplus currently exceeds recorded demand. "
-            "Continue matching donations to the highest-priority "
+    weather_api_key = os.getenv("WEATHER_API_KEY")
+    weather_location = os.getenv(
+        "WEATHER_LOCATION",
+        "San Francisco",
+    )
+
+    weather = {
+        "status": "not_configured",
+        "location": weather_location,
+    }
+
+    if weather_api_key:
+        try:
+            weather_response = requests.get(
+                "https://api.weatherapi.com/v1/current.json",
+                params={
+                    "key": weather_api_key,
+                    "q": weather_location,
+                    "aqi": "no",
+                    "alerts": "yes",
+                },
+                timeout=8,
+            )
+
+            if weather_response.ok:
+                weather_data = weather_response.json()
+
+                current = (
+                    weather_data.get("current")
+                    or {}
+                )
+
+                location = (
+                    weather_data.get("location")
+                    or {}
+                )
+
+                alerts = (
+                    weather_data.get("alerts", {})
+                    .get("alert", [])
+                    or []
+                )
+
+                weather = {
+                    "status": "ok",
+                    "location": location.get(
+                        "name",
+                        weather_location,
+                    ),
+                    "temperature_f": current.get(
+                        "temp_f"
+                    ),
+                    "feels_like_f": current.get(
+                        "feelslike_f"
+                    ),
+                    "condition": (
+                        current.get("condition", {})
+                        .get("text")
+                    ),
+                    "wind_mph": current.get(
+                        "wind_mph"
+                    ),
+                    "precipitation_in": current.get(
+                        "precip_in"
+                    ),
+                    "humidity": current.get(
+                        "humidity"
+                    ),
+                    "last_updated": current.get(
+                        "last_updated"
+                    ),
+                    "alert_count": len(alerts),
+                }
+
+            else:
+                weather = {
+                    "status": "error",
+                    "location": weather_location,
+                    "error": (
+                        f"WeatherAPI returned "
+                        f"{weather_response.status_code}"
+                    ),
+                }
+
+        except Exception as error:
+            print(
+                "=== WEATHER API ERROR ==="
+            )
+            print(repr(error))
+
+            weather = {
+                "status": "error",
+                "location": weather_location,
+                "error": str(error),
+            }
+
+    # ---------------------------------------------------------------
+    # Coordination signal
+    # ---------------------------------------------------------------
+
+    priority = "MODERATE"
+
+    if gap < 0:
+        priority = "HIGH"
+        message = (
+            f"Recorded demand exceeds available food by "
+            f"{abs(gap)} meals. Prioritize the highest-need "
             "community requests."
         )
+
+    elif gap > 50:
+        priority = "LOW"
+        message = (
+            f"Supply exceeds recorded demand by {gap} meals. "
+            "Focus on matching surplus efficiently while "
+            "community need remains high."
+        )
+
+    else:
+        message = (
+            f"Supply is available but should be allocated "
+            f"carefully against current community requests. "
+            f"Current food balance: {gap:+d} meals."
+        )
+
+    # Weather can elevate the coordination signal without
+    # pretending the system has a medical/emergency model.
+    if weather.get("status") == "ok":
+        alert_count = weather.get(
+            "alert_count",
+            0,
+        ) or 0
+
+        temperature_f = weather.get(
+            "temperature_f"
+        )
+
+        if alert_count > 0:
+            priority = "HIGH"
+            message = (
+                "Weather alerts are active. "
+                "Prioritize nearby food movements and "
+                "reduce unnecessary volunteer travel."
+            )
+
+        elif (
+            isinstance(temperature_f, (int, float))
+            and temperature_f >= 95
+        ):
+            priority = "HIGH"
+            message = (
+                "High heat conditions are present. "
+                "Prioritize nearby destinations and "
+                "minimize volunteer travel exposure."
+            )
 
     return {
         "supply": {
             "meals_available": meals_available,
             "donation_count": len(donations),
         },
+
         "demand": {
             "meals_requested": meals_requested,
-            "request_count": len(requests),
+            "request_count": len(requests_data),
         },
+
         "food_balance": {
-            "gap": supply_gap,
+            "gap": gap,
             "pressure": pressure,
         },
-        "community_need": community_need,
-        "weather": {
-            "status": "not_configured",
-            "location": "San Jose",
+
+        "community_need": {
+            "location": "San Francisco",
+            "pit_count": pit_count,
+            "unsheltered_count": unsheltered_count,
+            "sheltered_count": sheltered_count,
+            "data_year": 2024,
+            "signal": "HIGH",
+            "source": (
+                "San Francisco HSH 2024 "
+                "Point-in-Time Count"
+            ),
+            "source_type": (
+                "historical_public_snapshot"
+            ),
         },
+
+        "shelter_system": shelter_system,
+
+        "weather": weather,
+
         "coordination_signal": {
-            "priority": pressure,
-            "message": coordination_signal,
+            "priority": priority,
+            "message": message,
         },
     }
 # -------------------------------------------------------------------
