@@ -3,3 +3,10 @@
 *.mp4
 *.mov
 *.avi
+
+node_modules/
+.next/
+.env
+.env.local
+__pycache__/
+*.pyc
