@@ -346,6 +346,68 @@ function StatusBadge({
   );
 }
 
+function AgenticNode({
+  label,
+  detail,
+  icon: Icon,
+  active,
+}: {
+  label: string;
+  detail: string;
+  icon: React.ElementType;
+  active: boolean;
+}) {
+  const color = active ? C.green : C.faint;
+
+  return (
+    <div
+      className="flex min-w-[120px] flex-1 flex-col items-center gap-2 rounded-xl p-4 text-center"
+      style={{
+        background: active
+          ? "rgba(92,156,116,0.10)"
+          : "rgba(241,234,217,0.03)",
+        border: `1px solid ${color}`,
+      }}
+    >
+      <div
+        className="flex h-9 w-9 items-center justify-center rounded-full"
+        style={{
+          background: active
+            ? "rgba(92,156,116,0.16)"
+            : "rgba(241,234,217,0.04)",
+          border: `1px solid ${color}`,
+        }}
+      >
+        <Icon className="h-4 w-4" style={{ color }} />
+      </div>
+
+      <div
+        className="text-[9px] font-bold uppercase tracking-[0.13em]"
+        style={{
+          color: active ? C.text : C.muted,
+          fontFamily: "IBM Plex Mono, monospace",
+        }}
+      >
+        {label}
+      </div>
+
+      <div className="text-[9px]" style={{ color: C.faint }}>
+        {detail}
+      </div>
+    </div>
+  );
+}
+
+function AgenticConnector({ active }: { active: boolean }) {
+  const color = active ? C.green : C.line;
+
+  return (
+    <div className="flex w-8 shrink-0 items-center justify-center sm:w-10">
+      <ArrowRight className="h-4 w-4" style={{ color }} />
+    </div>
+  );
+}
+
 export default function CommunityPilot() {
   const [dashboard, setDashboard] =
     useState<Dashboard | null>(null);
@@ -381,6 +443,12 @@ export default function CommunityPilot() {
     useState<VolunteerCall | null>(null);
 
   const [volunteerCallError, setVolunteerCallError] =
+    useState<string | null>(null);
+
+  const [dispatchState, setDispatchState] =
+    useState<"idle" | "running" | "done" | "error">("idle");
+
+  const [dispatchMessage, setDispatchMessage] =
     useState<string | null>(null);
 
   const vapiRef = useRef<any>(null);
@@ -458,6 +526,46 @@ export default function CommunityPilot() {
     } catch (err) {
       console.error("Volunteer call fetch failed:", err);
       setVolunteerCallError("Waiting for volunteer call details...");
+    }
+  }
+
+  async function runDispatchOutreach() {
+    try {
+      setDispatchState("running");
+      setDispatchMessage(null);
+
+      const response = await fetch(
+        `${API_URL}/api/dispatch/outreach`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.message ?? `Backend returned ${response.status}`
+        );
+      }
+
+      setDispatchState("done");
+
+      if (data.status === "outreach_ready") {
+        setDispatchMessage(
+          `Matched ${data.summary?.plans_created ?? 0} donation(s) and contacted ${
+            data.summary?.volunteers_to_contact ?? 0
+          } volunteer(s).`
+        );
+      } else {
+        setDispatchMessage(
+          data.message ?? "No new matches were found."
+        );
+      }
+
+      loadDashboard();
+    } catch (err) {
+      console.error("Dispatch outreach failed:", err);
+      setDispatchState("error");
+      setDispatchMessage("Unable to run AI matching right now.");
     }
   }
 
@@ -741,6 +849,35 @@ export default function CommunityPilot() {
     dashboard?.volunteers,
     assignments,
   ]);
+
+  // Donations that have not been matched to a volunteer yet — the "food
+  // ready for pickup" side of the agentic trigger condition.
+  const foodAwaitingMatch = useMemo(() => {
+    return rescueQueue.filter(
+      (item) =>
+        !item.volunteer_outcome &&
+        !(item.workflow?.match_found ?? false)
+    );
+  }, [rescueQueue]);
+
+  // Volunteers not currently mid-assignment — the "volunteer ready" side
+  // of the agentic trigger condition.
+  const volunteersAvailable = useMemo(() => {
+    return volunteerNetwork.filter((volunteer) => {
+      const status = volunteer.status?.toLowerCase();
+      return !status || status === "available";
+    });
+  }, [volunteerNetwork]);
+
+  // Assignments where the AI has placed an outreach call and is still
+  // waiting on the volunteer's response.
+  const callsInProgress = useMemo(() => {
+    return assignments.filter(
+      (assignment) =>
+        Boolean(assignment.vapi_call_id) &&
+        !assignment.volunteer_outcome
+    );
+  }, [assignments]);
 
   // Poll the selected volunteer call only after activeAssignment has been
   // derived. This keeps the effect dependency safe and avoids referencing
@@ -2080,6 +2217,244 @@ export default function CommunityPilot() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* AGENTIC TRIGGER FLOW */}
+
+      <section className="relative z-10 mx-auto max-w-7xl px-6 py-4 lg:px-10">
+        <div
+          className="overflow-hidden rounded-2xl"
+          style={{
+            background: "rgba(241,234,217,0.025)",
+            border: `1px solid ${C.line}`,
+          }}
+        >
+          <div
+            className="flex flex-col gap-4 border-b px-6 py-5 sm:flex-row sm:items-center sm:justify-between lg:px-8"
+            style={{ borderColor: C.line }}
+          >
+            <div>
+              <div
+                className="text-[9px] font-semibold uppercase tracking-[0.2em]"
+                style={{
+                  color: C.orange,
+                  fontFamily: "IBM Plex Mono, monospace",
+                }}
+              >
+                Agentic trigger flow
+              </div>
+
+              <h2
+                className="mt-2 text-xl font-semibold"
+                style={{ fontFamily: "Space Grotesk, sans-serif" }}
+              >
+                When does Community Pilot call a volunteer?
+              </h2>
+
+              <p
+                className="mt-1 max-w-xl text-xs leading-5"
+                style={{ color: C.muted }}
+              >
+                The matching agent looks for a donation that still needs a
+                pickup and a volunteer who is not already on an assignment,
+                then the routing and coordinator agents build a plan and
+                place an AI outreach call.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={runDispatchOutreach}
+              disabled={dispatchState === "running"}
+              className="flex shrink-0 items-center justify-center gap-2 rounded-full px-5 py-3 text-[9px] font-bold uppercase tracking-[0.14em] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              style={{
+                background: C.paper,
+                color: C.ink,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {dispatchState === "running"
+                ? "Matching..."
+                : "Run AI matching now"}
+            </button>
+          </div>
+
+          <div className="grid gap-6 p-6 lg:grid-cols-[1.3fr_1fr] lg:p-8">
+            {/* FLOW DIAGRAM */}
+
+            <div>
+              <div className="flex flex-wrap items-stretch gap-2 sm:flex-nowrap">
+                <AgenticNode
+                  label="Food ready"
+                  detail={`${foodAwaitingMatch.length} awaiting pickup`}
+                  icon={Database}
+                  active={foodAwaitingMatch.length > 0}
+                />
+
+                <AgenticConnector
+                  active={
+                    foodAwaitingMatch.length > 0 &&
+                    volunteersAvailable.length > 0
+                  }
+                />
+
+                <AgenticNode
+                  label="Volunteer ready"
+                  detail={`${volunteersAvailable.length} available`}
+                  icon={UserRound}
+                  active={volunteersAvailable.length > 0}
+                />
+
+                <AgenticConnector active={callsInProgress.length > 0} />
+
+                <AgenticNode
+                  label="AI call placed"
+                  detail={`${callsInProgress.length} in progress`}
+                  icon={PhoneOutgoing}
+                  active={callsInProgress.length > 0}
+                />
+              </div>
+
+              <div
+                className="mt-5 rounded-xl p-4 text-[10px] leading-5"
+                style={{
+                  background: "rgba(241,234,217,0.035)",
+                  border: `1px solid ${C.line}`,
+                  color: C.muted,
+                }}
+              >
+                {foodAwaitingMatch.length > 0 &&
+                volunteersAvailable.length > 0 ? (
+                  <>
+                    <span style={{ color: C.orange, fontWeight: 600 }}>
+                      Ready to match:
+                    </span>{" "}
+                    {foodAwaitingMatch.length} donation(s) and{" "}
+                    {volunteersAvailable.length} volunteer(s) are waiting.
+                    Run AI matching to place outreach calls.
+                  </>
+                ) : (
+                  <>
+                    Nothing is waiting to be matched right now — Community
+                    Pilot needs both an unmatched donation and an available
+                    volunteer before it places a call.
+                  </>
+                )}
+
+                {dispatchMessage && (
+                  <div
+                    className="mt-2"
+                    style={{
+                      color:
+                        dispatchState === "error" ? C.red : C.green,
+                    }}
+                  >
+                    {dispatchMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* LIVE QUEUES */}
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              <div
+                className="rounded-xl p-4"
+                style={{
+                  background: "rgba(255,107,53,0.06)",
+                  border: "1px solid rgba(255,107,53,0.16)",
+                }}
+              >
+                <div
+                  className="text-[8px] font-bold uppercase tracking-[0.15em]"
+                  style={{
+                    color: C.orange,
+                    fontFamily: "IBM Plex Mono, monospace",
+                  }}
+                >
+                  Awaiting pickup match
+                </div>
+
+                {foodAwaitingMatch.length === 0 ? (
+                  <div
+                    className="mt-2 text-[10px]"
+                    style={{ color: C.faint }}
+                  >
+                    No unmatched donations.
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-1">
+                    {foodAwaitingMatch.slice(0, 4).map((item) => (
+                      <div
+                        key={`ready-food-${item.id}`}
+                        className="truncate text-[10px]"
+                        style={{ color: C.muted }}
+                      >
+                        {item.donor?.name ?? "Food donation"} ·{" "}
+                        {item.meals_assigned ?? 0} meals
+                      </div>
+                    ))}
+
+                    {foodAwaitingMatch.length > 4 && (
+                      <div className="text-[9px]" style={{ color: C.faint }}>
+                        +{foodAwaitingMatch.length - 4} more
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div
+                className="rounded-xl p-4"
+                style={{
+                  background: "rgba(92,156,116,0.07)",
+                  border: "1px solid rgba(92,156,116,0.16)",
+                }}
+              >
+                <div
+                  className="text-[8px] font-bold uppercase tracking-[0.15em]"
+                  style={{
+                    color: C.green,
+                    fontFamily: "IBM Plex Mono, monospace",
+                  }}
+                >
+                  Available volunteers
+                </div>
+
+                {volunteersAvailable.length === 0 ? (
+                  <div
+                    className="mt-2 text-[10px]"
+                    style={{ color: C.faint }}
+                  >
+                    No volunteers available.
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-1">
+                    {volunteersAvailable
+                      .slice(0, 4)
+                      .map((volunteer, index) => (
+                        <div
+                          key={`ready-volunteer-${volunteer.id ?? index}`}
+                          className="truncate text-[10px]"
+                          style={{ color: C.muted }}
+                        >
+                          {volunteer.name ?? "Volunteer"}
+                          {volunteer.city ? ` · ${volunteer.city}` : ""}
+                        </div>
+                      ))}
+
+                    {volunteersAvailable.length > 4 && (
+                      <div className="text-[9px]" style={{ color: C.faint }}>
+                        +{volunteersAvailable.length - 4} more
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
