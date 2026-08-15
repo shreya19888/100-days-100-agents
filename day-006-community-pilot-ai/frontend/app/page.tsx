@@ -88,6 +88,7 @@ type Assignment = {
 
   created_at?: string | null;
   updated_at?: string | null;
+  rescue_activity_at?: string | null;
 
   donor?: {
     name?: string | null;
@@ -171,6 +172,18 @@ type VolunteerCall = {
   messages?: Array<{ role?: string; message?: string; time?: number | null }>;
 };
 
+type Volunteer = {
+  id?: string;
+  name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  status?: string | null;
+  availability?: string | null;
+  city?: string | null;
+  created_at?: string | null;
+  timestamp?: string | null;
+};
+
 type Dashboard = {
   stats: {
     meals_rescued: number;
@@ -187,6 +200,11 @@ type Dashboard = {
   };
 
   recent_assignments: Assignment[];
+
+  // Supported when the backend returns richer collections.
+  rescue_queue?: Assignment[];
+  volunteers_list?: Volunteer[];
+  volunteers?: Volunteer[];
 };
 
 function statusLabel(status?: string | null) {
@@ -617,6 +635,112 @@ export default function CommunityPilot() {
       (a) =>
         a.id !== activeAssignment?.id
     );
+
+  const rescueQueue = useMemo(() => {
+    const source =
+      Array.isArray(dashboard?.rescue_queue) &&
+      dashboard.rescue_queue.length > 0
+        ? dashboard.rescue_queue
+        : assignments;
+
+    return [...source].sort((a, b) => {
+      const aTime = new Date(
+        a.rescue_activity_at ??
+          a.updated_at ??
+          a.created_at ??
+          0
+      ).getTime();
+
+      const bTime = new Date(
+        b.rescue_activity_at ??
+          b.updated_at ??
+          b.created_at ??
+          0
+      ).getTime();
+
+      return bTime - aTime;
+    });
+  }, [dashboard?.rescue_queue, assignments]);
+
+  const volunteerNetwork = useMemo<Volunteer[]>(() => {
+    const backendVolunteers =
+      dashboard?.volunteers_list ??
+      dashboard?.volunteers ??
+      [];
+
+    const byKey = new Map<string, Volunteer>();
+
+    for (const volunteer of backendVolunteers) {
+      const key =
+        volunteer.id ??
+        volunteer.email ??
+        volunteer.phone ??
+        volunteer.name ??
+        `volunteer-${byKey.size}`;
+
+      byKey.set(key, volunteer);
+    }
+
+    for (const assignment of assignments) {
+      const volunteer = assignment.volunteer;
+
+      if (
+        !volunteer?.name &&
+        !volunteer?.email &&
+        !volunteer?.phone
+      ) {
+        continue;
+      }
+
+      const key =
+        volunteer.email ??
+        volunteer.phone ??
+        volunteer.name ??
+        `assignment-${assignment.id}`;
+
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          id: key,
+          name: volunteer.name,
+          email: volunteer.email,
+          phone: volunteer.phone,
+          status:
+            assignment.volunteer_outcome ??
+            (assignment.vapi_call_id
+              ? "outreach"
+              : "matched"),
+          city:
+            assignment.pickup_city ??
+            assignment.delivery_city ??
+            null,
+          created_at: assignment.created_at,
+        });
+      }
+    }
+
+    return Array.from(byKey.values()).sort(
+      (a, b) => {
+        const aRaw = a.timestamp ?? a.created_at ?? "";
+        const bRaw = b.timestamp ?? b.created_at ?? "";
+
+        const aTime = Date.parse(aRaw);
+        const bTime = Date.parse(bRaw);
+
+        if (Number.isFinite(aTime) && Number.isFinite(bTime)) {
+          return bTime - aTime;
+        }
+
+        if (Number.isFinite(aTime)) return -1;
+        if (Number.isFinite(bTime)) return 1;
+
+        return 0;
+      }
+    );
+  }, [
+    dashboard?.volunteers_list,
+    dashboard?.volunteers,
+    assignments,
+  ]);
 
   // Poll the selected volunteer call only after activeAssignment has been
   // derived. This keeps the effect dependency safe and avoids referencing
@@ -1625,6 +1749,342 @@ export default function CommunityPilot() {
         </section>
       )}
 
+      {/* RESCUE QUEUE + VOLUNTEER NETWORK */}
+
+      <section className="relative z-10 mx-auto max-w-7xl px-6 py-4 lg:px-10">
+        <div className="grid gap-3 lg:grid-cols-[1.15fr_0.85fr]">
+          <div
+            className="overflow-hidden rounded-2xl"
+            style={{
+              background: "rgba(241,234,217,0.025)",
+              border: `1px solid ${C.line}`,
+            }}
+          >
+            <div
+              className="flex items-center justify-between border-b px-6 py-5 lg:px-7"
+              style={{ borderColor: C.line }}
+            >
+              <div>
+                <div
+                  className="text-[9px] font-semibold uppercase tracking-[0.2em]"
+                  style={{
+                    color: C.orange,
+                    fontFamily: "IBM Plex Mono, monospace",
+                  }}
+                >
+                  Dispatch queue
+                </div>
+                <h2
+                  className="mt-1 text-xl font-semibold"
+                  style={{ fontFamily: "Space Grotesk, sans-serif" }}
+                >
+                  Rescues in queue
+                </h2>
+              </div>
+
+              <span
+                className="rounded-full px-2.5 py-1 text-[8px] font-bold uppercase tracking-[0.14em]"
+                style={{
+                  color: C.orange,
+                  border: `1px solid ${C.orange}`,
+                  fontFamily: "IBM Plex Mono, monospace",
+                }}
+              >
+                {rescueQueue.length} active
+              </span>
+            </div>
+
+            <div className="max-h-[470px] overflow-y-auto p-5 lg:p-6">
+              <div className="grid gap-2">
+              {rescueQueue.length === 0 ? (
+                <div
+                  className="rounded-xl p-5 text-center text-[10px]"
+                  style={{
+                    background: "rgba(241,234,217,0.025)",
+                    border: `1px solid ${C.line}`,
+                    color: C.faint,
+                  }}
+                >
+                  No rescues are waiting in the dispatch queue.
+                  <div
+                    className="mt-2 text-[8px] uppercase tracking-[0.12em]"
+                    style={{
+                      fontFamily: "IBM Plex Mono, monospace",
+                    }}
+                  >
+                    New food requests and matched donations will appear here.
+                  </div>
+                </div>
+              ) : (
+                rescueQueue.map((assignment) => {
+                  const awaitingVolunteer =
+                    !assignment.volunteer_outcome &&
+                    Boolean(
+                      assignment.vapi_call_id ||
+                      assignment.workflow?.match_found
+                    );
+
+                  const queueColor =
+                    assignment.volunteer_outcome === "declined"
+                      ? C.red
+                      : assignment.volunteer_outcome === "accepted"
+                        ? C.green
+                        : C.orange;
+
+                  return (
+                    <button
+                      key={`queue-${assignment.id}`}
+                      type="button"
+                      onClick={() => setSelectedId(assignment.id)}
+                      className="card-hover rounded-xl p-4 text-left"
+                      style={{
+                        background: "rgba(241,234,217,0.035)",
+                        border: `1px solid ${C.line}`,
+                      }}
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div
+                              className="truncate text-sm font-semibold"
+                              style={{ color: C.text }}
+                            >
+                              {assignment.donor?.name ?? "Food rescue"}
+                            </div>
+
+                            <span
+                              className="rounded-full px-2 py-1 text-[7px] font-bold uppercase tracking-[0.12em]"
+                              style={{
+                                color: queueColor,
+                                border: `1px solid ${queueColor}`,
+                                fontFamily: "IBM Plex Mono, monospace",
+                              }}
+                            >
+                              {assignment.volunteer_outcome
+                                ? statusLabel(
+                                    assignment.volunteer_outcome
+                                  )
+                                : assignment.vapi_call_id
+                                  ? "AI outreach"
+                                  : "Needs dispatch"}
+                            </span>
+                          </div>
+
+                          <div
+                            className="mt-1 text-[9px]"
+                            style={{ color: C.muted }}
+                          >
+                            {assignment.meals_assigned ?? 0} meals ·{" "}
+                            {assignment.pickup_city ?? "San Jose"} →{" "}
+                            {assignment.delivery_city ??
+                              assignment.recipient?.name ??
+                              assignment.delivery_organization ??
+                              "Community destination"}
+                          </div>
+                        </div>
+
+                        <div className="shrink-0 text-left sm:text-right">
+                          <div
+                            className="text-[8px] font-bold uppercase tracking-[0.12em]"
+                            style={{
+                              color: awaitingVolunteer
+                                ? C.orange
+                                : C.faint,
+                              fontFamily:
+                                "IBM Plex Mono, monospace",
+                            }}
+                          >
+                            {awaitingVolunteer
+                              ? "Volunteer response pending"
+                              : statusLabel(assignment.status)}
+                          </div>
+
+                          <div
+                            className="mt-1 text-[8px]"
+                            style={{ color: C.faint }}
+                          >
+                            {formatTime(
+                              assignment.rescue_activity_at ??
+                                assignment.updated_at ??
+                                assignment.created_at
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+              </div>
+            </div>
+          </div>
+
+          <div
+            className="overflow-hidden rounded-2xl"
+            style={{
+              background: "rgba(241,234,217,0.025)",
+              border: `1px solid ${C.line}`,
+            }}
+          >
+            <div
+              className="flex items-center justify-between border-b px-6 py-5 lg:px-7"
+              style={{ borderColor: C.line }}
+            >
+              <div>
+                <div
+                  className="text-[9px] font-semibold uppercase tracking-[0.2em]"
+                  style={{
+                    color: C.green,
+                    fontFamily: "IBM Plex Mono, monospace",
+                  }}
+                >
+                  Volunteer network
+                </div>
+
+                <h2
+                  className="mt-1 text-xl font-semibold"
+                  style={{ fontFamily: "Space Grotesk, sans-serif" }}
+                >
+                  People ready to help
+                </h2>
+              </div>
+
+              <div
+                className="text-[8px] uppercase tracking-[0.12em]"
+                style={{
+                  color: C.faint,
+                  fontFamily: "IBM Plex Mono, monospace",
+                }}
+              >
+                {dashboard?.counts.volunteers ??
+                  volunteerNetwork.length}{" "}
+                registered
+              </div>
+            </div>
+
+            <div className="p-5 lg:p-6">
+              {volunteerNetwork.length === 0 ? (
+                <div
+                  className="rounded-xl p-5 text-center text-[10px]"
+                  style={{
+                    background: "rgba(241,234,217,0.025)",
+                    border: `1px solid ${C.line}`,
+                    color: C.faint,
+                  }}
+                >
+                  No volunteer profiles are available in the dashboard yet.
+
+                  <div
+                    className="mt-2 text-[8px] uppercase tracking-[0.12em]"
+                    style={{
+                      fontFamily: "IBM Plex Mono, monospace",
+                    }}
+                  >
+                    New volunteer registrations will appear here once the
+                    backend exposes them.
+                  </div>
+                </div>
+              ) : (
+                <div className="max-h-[430px] space-y-2 overflow-y-auto pr-1">
+                  {volunteerNetwork.map(
+                    (volunteer, index) => {
+                      const normalizedStatus =
+                        volunteer.status?.toLowerCase();
+
+                      const isAccepted =
+                        normalizedStatus === "accepted";
+
+                      const isDeclined =
+                        normalizedStatus === "declined";
+
+                      const isOutreach =
+                        normalizedStatus === "outreach" ||
+                        normalizedStatus === "outreach_pending";
+
+                      const color = isDeclined
+                        ? C.red
+                        : isAccepted
+                          ? C.green
+                          : isOutreach
+                            ? C.orange
+                            : C.green;
+
+                      return (
+                        <div
+                          key={
+                            volunteer.id ??
+                            volunteer.email ??
+                            volunteer.phone ??
+                            `${volunteer.name}-${index}`
+                          }
+                          className="flex items-center gap-3 rounded-xl p-3"
+                          style={{
+                            background:
+                              "rgba(241,234,217,0.035)",
+                            border: `1px solid ${C.line}`,
+                          }}
+                        >
+                          <div
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+                            style={{
+                              background: `${color}18`,
+                              border: `1px solid ${color}`,
+                            }}
+                          >
+                            <UserRound
+                              className="h-4 w-4"
+                              style={{ color }}
+                            />
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div
+                              className="truncate text-xs font-semibold"
+                              style={{ color: C.text }}
+                            >
+                              {volunteer.name ??
+                                "New volunteer"}
+                            </div>
+
+                            <div
+                              className="mt-0.5 truncate text-[8px]"
+                              style={{ color: C.faint }}
+                            >
+                              {volunteer.city ??
+                                volunteer.email ??
+                                volunteer.phone ??
+                                "Volunteer registration"}
+                            </div>
+                          </div>
+
+                          <span
+                            className="shrink-0 rounded-full px-2 py-1 text-[7px] font-bold uppercase tracking-[0.11em]"
+                            style={{
+                              color,
+                              border: `1px solid ${color}`,
+                              fontFamily:
+                                "IBM Plex Mono, monospace",
+                            }}
+                          >
+                            {isAccepted
+                              ? "Accepted"
+                              : isDeclined
+                                ? "Declined"
+                                : isOutreach
+                                  ? "AI outreach"
+                                  : "Available"}
+                          </span>
+                        </div>
+                      );
+                    }
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* RECENT RESCUES */}
 
       <section className="relative z-10 mx-auto max-w-7xl px-6 pb-24 pt-10 lg:px-10">
@@ -1682,7 +2142,17 @@ export default function CommunityPilot() {
         </div>
 
         <div className="grid gap-3">
-          {otherAssignments.map(
+          {[...assignments]
+            .sort((a, b) => {
+              const aTime = new Date(
+                a.updated_at ?? a.created_at ?? 0
+              ).getTime();
+              const bTime = new Date(
+                b.updated_at ?? b.created_at ?? 0
+              ).getTime();
+              return bTime - aTime;
+            })
+            .map(
             (assignment) => {
               const selected =
                 selectedId === assignment.id;
@@ -2633,7 +3103,6 @@ export default function CommunityPilot() {
                           <div className="font-semibold" style={{ color: C.text }}>
                             {intelligence?.weather?.precipitation_in != null
                               ? `${intelligence.weather.precipitation_in}"`
-
                               : "—"}
                           </div>
                           precipitation
@@ -2826,10 +3295,16 @@ export default function CommunityPilot() {
                         <UserRound className="h-3.5 w-3.5" style={{ color: C.green }} />
                         <div>
                           <div className="text-sm font-semibold">{activeAssignment?.volunteer?.name ?? "Volunteer pending"}</div>
-                          <div className="mt-0.5 text-[8px] uppercase tracking-[0.12em]" style={{ color: C.faint, fontFamily: "IBM Plex Mono, monospace" }}>Volunteer match found</div>
+                          <div className="mt-0.5 text-[8px] uppercase tracking-[0.12em]" style={{ color: C.faint, fontFamily: "IBM Plex Mono, monospace" }}>
+                            {activeAssignment?.volunteer?.name
+                              ? "Volunteer match found"
+                              : "Searching volunteer network"}
+                          </div>
                         </div>
                       </div>
-                      <span className="rounded-full px-2 py-1 text-[7px] font-bold uppercase tracking-[0.12em]" style={{ color: C.green, border: `1px solid ${C.green}`, fontFamily: "IBM Plex Mono, monospace" }}>MATCHED</span>
+                      <span className="rounded-full px-2 py-1 text-[7px] font-bold uppercase tracking-[0.12em]" style={{ color: activeAssignment?.volunteer?.name ? C.green : C.orange, border: `1px solid ${activeAssignment?.volunteer?.name ? C.green : C.orange}`, fontFamily: "IBM Plex Mono, monospace" }}>
+                        {activeAssignment?.volunteer?.name ? "MATCHED" : "SEARCHING"}
+                      </span>
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-[8px]" style={{ color: C.muted }}>
                       <div>Meals <span style={{ color: C.text }}>{activeAssignment?.meals_assigned ?? 0}</span></div>

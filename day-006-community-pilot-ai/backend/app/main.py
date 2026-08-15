@@ -365,9 +365,6 @@ async def intelligence():
         print("=== COMMUNITY INTELLIGENCE ERROR ===")
         print(repr(error))
 
-        # Safe deterministic fallback.
-        # The dashboard continues to function if OpenAI is
-        # temporarily unavailable or not configured.
         coordination_signal = {
             "priority": pressure,
             "headline": (
@@ -389,10 +386,6 @@ async def intelligence():
             "model": None,
             "source": "Community Pilot fallback",
         }
-
-    # ---------------------------------------------------------------
-    # Return intelligence payload
-    # ---------------------------------------------------------------
 
     return {
         "supply": supply,
@@ -422,10 +415,6 @@ async def dashboard():
 
     into a single frontend-friendly payload.
     """
-
-    # ---------------------------------------------------------------
-    # Fetch core tables
-    # ---------------------------------------------------------------
 
     donations_response = (
         supabase
@@ -460,10 +449,6 @@ async def dashboard():
     volunteers = volunteers_response.data or []
     assignments = assignments_response.data or []
 
-    # ---------------------------------------------------------------
-    # Build lookup dictionaries
-    # ---------------------------------------------------------------
-
     donation_lookup = {
         str(donation.get("whalesync_postgres_id")): donation
         for donation in donations
@@ -481,10 +466,6 @@ async def dashboard():
         for volunteer in volunteers
         if volunteer.get("whalesync_postgres_id")
     }
-
-    # ---------------------------------------------------------------
-    # Calculate impact
-    # ---------------------------------------------------------------
 
     meals_rescued = 0
 
@@ -518,10 +499,6 @@ async def dashboard():
         ]
     )
 
-    # ---------------------------------------------------------------
-    # Enrich dispatch assignments
-    # ---------------------------------------------------------------
-
     enriched_assignments = []
 
     for assignment in assignments:
@@ -550,10 +527,6 @@ async def dashboard():
             volunteer_id
         )
 
-        # -----------------------------------------------------------
-        # Donor information
-        # -----------------------------------------------------------
-
         donor_name = None
         donor_contact = None
 
@@ -566,10 +539,6 @@ async def dashboard():
                 "contact_name"
             )
 
-        # -----------------------------------------------------------
-        # Recipient information
-        # -----------------------------------------------------------
-
         recipient_name = None
         recipient_contact = None
 
@@ -581,10 +550,6 @@ async def dashboard():
             recipient_contact = request.get(
                 "contact_name"
             )
-
-        # -----------------------------------------------------------
-        # Volunteer information
-        # -----------------------------------------------------------
 
         volunteer_name = None
         volunteer_email = None
@@ -602,10 +567,6 @@ async def dashboard():
             volunteer_phone = volunteer.get(
                 "phone_number"
             )
-
-        # -----------------------------------------------------------
-        # Build frontend-friendly assignment
-        # -----------------------------------------------------------
 
         enriched_assignment = {
             **assignment,
@@ -671,18 +632,126 @@ async def dashboard():
         )
 
     # ---------------------------------------------------------------
-    # Sort newest assignments first
+    # Sort recent assignments newest-first.
+    #
+    # Prefer updated_at because volunteer outreach, call status,
+    # acceptance/decline, and calendar changes update this timestamp.
+    # Fall back to created_at for older records.
     # ---------------------------------------------------------------
 
     recent_assignments = sorted(
         enriched_assignments,
-        key=lambda x: x.get("updated_at") or "",
+        key=lambda x: (
+            x.get("updated_at")
+            or x.get("created_at")
+            or ""
+        ),
         reverse=True,
-    )[:10]
+    )[:50]
 
     # ---------------------------------------------------------------
-    # Return dashboard payload
+    # Volunteer Network
+    #
+    # Return the actual volunteer signup records, not just the count.
+    # This allows the frontend to show newly registered volunteers
+    # even when they have not yet been matched to a dispatch.
+    #
+    # The newest signup/activity appears first.
+    #
+    # Returns the FULL sorted list — the frontend is responsible for
+    # scrolling. Do not truncate here.
     # ---------------------------------------------------------------
+
+    volunteers_list = sorted(
+        volunteers,
+        key=lambda volunteer: (
+            volunteer.get("timestamp")
+            or volunteer.get("created_at")
+            or volunteer.get("updated_at")
+            or ""
+        ),
+        reverse=True,
+    )
+
+    # ---------------------------------------------------------------
+    # Unified Rescue Queue
+    #
+    # Include dispatch assignments plus brand-new donations that
+    # have not been matched yet. New rescues therefore appear
+    # immediately after the donation is recorded.
+    #
+    # Returns the FULL sorted queue — the frontend is responsible for
+    # scrolling. Do not truncate here.
+    # ---------------------------------------------------------------
+
+    assigned_donation_ids = {
+        str(assignment.get("donation_id"))
+        for assignment in assignments
+        if assignment.get("donation_id")
+    }
+
+    rescue_queue = list(enriched_assignments)
+
+    for donation in donations:
+        donation_id = str(
+            donation.get("whalesync_postgres_id") or ""
+        )
+
+        if not donation_id or donation_id in assigned_donation_ids:
+            continue
+
+        try:
+            meals_available = int(
+                donation.get(
+                    "approximately_how_many_meals_or_servings_are_available",
+                    0,
+                )
+            )
+        except (TypeError, ValueError):
+            meals_available = 0
+
+        rescue_queue.append({
+            "id": f"donation-{donation_id}",
+            "status": "needs_dispatch",
+            "volunteer_outcome": None,
+            "meals_assigned": meals_available,
+            "pickup_address": donation.get("pickup_address"),
+            "pickup_city": donation.get("city"),
+            "created_at": donation.get("timestamp"),
+            "updated_at": donation.get("timestamp"),
+            "donor": {
+                "name": donation.get("restaurant_business_name"),
+                "contact": donation.get("contact_name"),
+            },
+            "recipient": {
+                "name": None,
+                "contact": None,
+            },
+            "volunteer": {
+                "name": None,
+                "email": None,
+                "phone": None,
+            },
+            "workflow": {
+                "form_submitted": True,
+                "donation_logged": True,
+                "match_found": False,
+                "ai_call_placed": False,
+                "pickup_confirmed": False,
+                "delivery_scheduled": False,
+                "delivery_completed": False,
+            },
+        })
+
+    rescue_queue = sorted(
+        rescue_queue,
+        key=lambda x: (
+            x.get("updated_at")
+            or x.get("created_at")
+            or ""
+        ),
+        reverse=True,
+    )
 
     return {
         "stats": {
@@ -700,6 +769,12 @@ async def dashboard():
         },
 
         "recent_assignments": recent_assignments,
+
+        "rescue_queue": rescue_queue,
+
+        # Full volunteer registry for the Volunteer Network UI.
+        # New volunteers appear here immediately after signup.
+        "volunteers_list": volunteers_list,
     }
 
 
@@ -709,11 +784,6 @@ async def dashboard():
 
 @app.get("/api/volunteer-call/{call_id}")
 async def volunteer_call(call_id: str):
-    """
-    Return the latest Vapi call state and transcript.
-
-    The Vapi private API key stays server-side.
-    """
 
     api_key = os.getenv("VAPI_API_KEY")
 
@@ -779,17 +849,6 @@ async def volunteer_call(call_id: str):
 
 @app.get("/api/activity")
 async def activity():
-    """
-    Return recent real workflow events for the dashboard.
-
-    Events are derived from the current Dispatch Assignment
-    records, so the frontend can poll this endpoint and show
-    what Community Pilot has actually completed.
-    """
-
-    # ---------------------------------------------------------------
-    # Fetch assignments
-    # ---------------------------------------------------------------
 
     assignments_response = (
         supabase
@@ -799,10 +858,6 @@ async def activity():
     )
 
     assignments = assignments_response.data or []
-
-    # ---------------------------------------------------------------
-    # Fetch related records
-    # ---------------------------------------------------------------
 
     donations_response = (
         supabase
@@ -822,10 +877,6 @@ async def activity():
 
     volunteers = volunteers_response.data or []
 
-    # ---------------------------------------------------------------
-    # Build lookups
-    # ---------------------------------------------------------------
-
     donation_lookup = {
         str(donation.get("whalesync_postgres_id")): donation
         for donation in donations
@@ -837,10 +888,6 @@ async def activity():
         for volunteer in volunteers
         if volunteer.get("whalesync_postgres_id")
     }
-
-    # ---------------------------------------------------------------
-    # Build activity events
-    # ---------------------------------------------------------------
 
     events = []
 
@@ -883,10 +930,6 @@ async def activity():
             or created_at
         )
 
-        # -----------------------------------------------------------
-        # Donation received
-        # -----------------------------------------------------------
-
         if assignment.get("donation_id"):
 
             events.append(
@@ -904,10 +947,6 @@ async def activity():
                     "status": "complete",
                 }
             )
-
-        # -----------------------------------------------------------
-        # AI match
-        # -----------------------------------------------------------
 
         if assignment.get("id"):
 
@@ -934,10 +973,6 @@ async def activity():
                 }
             )
 
-        # -----------------------------------------------------------
-        # Volunteer AI call
-        # -----------------------------------------------------------
-
         if assignment.get("vapi_call_id"):
 
             events.append(
@@ -955,10 +990,6 @@ async def activity():
                     "status": "complete",
                 }
             )
-
-        # -----------------------------------------------------------
-        # Volunteer response
-        # -----------------------------------------------------------
 
         outcome = assignment.get(
             "volunteer_outcome"
@@ -1000,10 +1031,6 @@ async def activity():
                 }
             )
 
-        # -----------------------------------------------------------
-        # Calendar event
-        # -----------------------------------------------------------
-
         if assignment.get("calendar_event_id"):
 
             events.append(
@@ -1021,10 +1048,6 @@ async def activity():
                     "status": "complete",
                 }
             )
-
-        # -----------------------------------------------------------
-        # Delivery
-        # -----------------------------------------------------------
 
         if assignment.get("status") in [
             "delivered",
@@ -1054,10 +1077,6 @@ async def activity():
                 }
             )
 
-    # ---------------------------------------------------------------
-    # Sort newest first
-    # ---------------------------------------------------------------
-
     events = sorted(
         events,
         key=lambda event: event.get("timestamp") or "",
@@ -1078,11 +1097,6 @@ async def activity():
 async def create_voice_donation(
     payload: dict[str, Any],
 ):
-    """
-    Receives a create_food_donation tool call from Vapi,
-    creates the donation in Supabase, and returns the
-    tool result to Vapi.
-    """
 
     print("=== VAPI DONATION REQUEST ===")
     print(payload)
@@ -1122,10 +1136,6 @@ async def create_voice_donation(
         print("=== ARGUMENTS ===")
         print(arguments)
 
-        # -----------------------------------------------------------
-        # Create food donation
-        # -----------------------------------------------------------
-
         if function_name == "create_food_donation":
 
             try:
@@ -1159,10 +1169,6 @@ async def create_voice_donation(
                     }
                 )
 
-        # -----------------------------------------------------------
-        # Unknown tool
-        # -----------------------------------------------------------
-
         else:
 
             print("=== UNKNOWN TOOL ===")
@@ -1189,10 +1195,6 @@ async def create_voice_donation(
 
 @app.post("/api/dispatch")
 async def dispatch():
-
-    # ---------------------------------------------------------------
-    # 1. Load live data
-    # ---------------------------------------------------------------
 
     donations = get_donations()
     volunteers = get_volunteers()
@@ -1222,10 +1224,6 @@ async def dispatch():
             ),
         }
 
-    # ---------------------------------------------------------------
-    # 2. Matching Agent
-    # ---------------------------------------------------------------
-
     matching_agent = MatchingAgent()
 
     matches = matching_agent.find_matches(
@@ -1242,10 +1240,6 @@ async def dispatch():
                 "and volunteer combination was found."
             ),
         }
-
-    # ---------------------------------------------------------------
-    # 3. Routing Agent
-    # ---------------------------------------------------------------
 
     routing_agent = RoutingAgent()
 
@@ -1309,10 +1303,6 @@ async def dispatch():
             }
         )
 
-    # ---------------------------------------------------------------
-    # 4. Coordinator Agent
-    # ---------------------------------------------------------------
-
     coordinator = CoordinatorAgent()
 
     plans = []
@@ -1349,10 +1339,6 @@ async def dispatch():
         plan["routes"] = match["routes"]
 
         plans.append(plan)
-
-    # ---------------------------------------------------------------
-    # 5. Return complete operational picture
-    # ---------------------------------------------------------------
 
     return {
         "status": "dispatch_plan_created",
@@ -1522,9 +1508,31 @@ async def dispatch_outreach():
             outreach_volunteers.append(
                 {
                     **volunteer_match,
-                    "phone": volunteer.get("phone"),
-                    "email": volunteer.get("email"),
-                    "name": volunteer.get("name"),
+
+                    "phone": volunteer.get(
+                        "phone",
+                        volunteer.get(
+                            "phone_number"
+                        ),
+                    ),
+
+                    "email": volunteer.get(
+                        "email"
+                    ),
+
+                    "name": volunteer.get(
+                        "name",
+                        volunteer.get(
+                            "full_name"
+                        ),
+                    ),
+
+                    "id": volunteer.get(
+                        "id",
+                        volunteer.get(
+                            "whalesync_postgres_id"
+                        ),
+                    ),
                 }
             )
 
@@ -1584,6 +1592,169 @@ async def dispatch_outreach():
                 assignment_data
             )
 
+            # -------------------------------------------------------
+            # Automatically place volunteer AI call
+            # -------------------------------------------------------
+
+            call_status = "not_attempted"
+            vapi_call_id = None
+            call_error = None
+
+            try:
+
+                call_volunteer = {
+                    "id": volunteer_match.get(
+                        "id",
+                        volunteer_match.get(
+                            "volunteer_id"
+                        ),
+                    ),
+
+                    "name": volunteer_match.get(
+                        "name",
+                        volunteer_match.get(
+                            "volunteer_name"
+                        ),
+                    ),
+
+                    "email": volunteer_match.get(
+                        "email"
+                    ),
+
+                    "phone": volunteer_match.get(
+                        "phone"
+                    ),
+                }
+
+                if not call_volunteer["phone"]:
+
+                    call_status = "missing_phone"
+
+                    call_error = (
+                        "Volunteer does not have "
+                        "a phone number."
+                    )
+
+                else:
+
+                    vapi_assignment = {
+                        "assignment_id": assignment["id"],
+                        "donation_id": assignment.get(
+                            "donation_id"
+                        ),
+                        "request_id": assignment.get(
+                            "request_id"
+                        ),
+                        "volunteer_id": assignment.get(
+                            "volunteer_id"
+                        ),
+                        "meals_assigned": assignment.get(
+                            "meals_assigned",
+                            0,
+                        ),
+                        "pickup_address": assignment.get(
+                            "pickup_address",
+                            "",
+                        ),
+                        "pickup_city": assignment.get(
+                            "pickup_city",
+                            "",
+                        ),
+                        "pickup_deadline": assignment.get(
+                            "pickup_deadline",
+                            "",
+                        ),
+                        "delivery_organization": assignment.get(
+                            "delivery_organization",
+                            "",
+                        ),
+                        "delivery_address": assignment.get(
+                            "delivery_address",
+                            "",
+                        ),
+                        "delivery_city": assignment.get(
+                            "delivery_city",
+                            "",
+                        ),
+                        "delivery_instructions": assignment.get(
+                            "delivery_instructions",
+                            "",
+                        ),
+                    }
+
+                    print(
+                        "=== AUTOMATIC VOLUNTEER OUTREACH ==="
+                    )
+
+                    print(
+                        f"Calling "
+                        f"{call_volunteer['name']} "
+                        f"at "
+                        f"{call_volunteer['phone']}"
+                    )
+
+                    vapi_response = place_volunteer_call(
+                        volunteer=call_volunteer,
+                        assignment=vapi_assignment,
+                    )
+
+                    vapi_call_id = (
+                        vapi_response.get("id")
+                    )
+
+                    if vapi_call_id:
+
+                        supabase.table(
+                            "Dispatch Assignment"
+                        ).update(
+                            {
+                                "vapi_call_id": vapi_call_id,
+                                "updated_at": (
+                                    datetime.now()
+                                    .isoformat()
+                                ),
+                            }
+                        ).eq(
+                            "id",
+                            assignment["id"],
+                        ).execute()
+
+                        call_status = (
+                            "call_initiated"
+                        )
+
+                        print(
+                            "=== VAPI CALL INITIATED ==="
+                        )
+
+                        print(
+                            vapi_call_id
+                        )
+
+                    else:
+
+                        call_status = "call_failed"
+
+                        call_error = (
+                            "Vapi returned "
+                            "no call ID."
+                        )
+
+            except Exception as error:
+
+                print(
+                    "=== AUTOMATIC VAPI "
+                    "OUTREACH ERROR ==="
+                )
+
+                print(
+                    repr(error)
+                )
+
+                call_status = "call_failed"
+
+                call_error = str(error)
+
             assignments.append(
                 {
                     "assignment_id": assignment["id"],
@@ -1591,7 +1762,10 @@ async def dispatch_outreach():
                         "volunteer_id"
                     ],
                     "volunteer_name": volunteer_match.get(
-                        "volunteer_name"
+                        "volunteer_name",
+                        volunteer_match.get(
+                            "name"
+                        ),
                     ),
                     "phone": volunteer_match.get(
                         "phone"
@@ -1603,7 +1777,15 @@ async def dispatch_outreach():
                         "meals_assigned",
                         0,
                     ),
-                    "status": assignment["status"],
+                    "status": (
+                        "outreach_in_progress"
+                        if call_status
+                        == "call_initiated"
+                        else assignment["status"]
+                    ),
+                    "call_status": call_status,
+                    "vapi_call_id": vapi_call_id,
+                    "call_error": call_error,
                 }
             )
 
@@ -1685,10 +1867,6 @@ async def call_volunteer_for_assignment(
     assignment_id: str,
 ):
 
-    # ---------------------------------------------------------------
-    # 1. Get assignment
-    # ---------------------------------------------------------------
-
     response = (
         supabase
         .table("Dispatch Assignment")
@@ -1709,20 +1887,12 @@ async def call_volunteer_for_assignment(
 
     assignment = response.data[0]
 
-    # ---------------------------------------------------------------
-    # 2. Prevent duplicate calls
-    # ---------------------------------------------------------------
-
     if assignment.get("vapi_call_id"):
         return {
             "status": "already_called",
             "assignment_id": assignment_id,
             "vapi_call_id": assignment["vapi_call_id"],
         }
-
-    # ---------------------------------------------------------------
-    # 3. Get volunteer
-    # ---------------------------------------------------------------
 
     volunteer_response = (
         supabase
@@ -1745,10 +1915,6 @@ async def call_volunteer_for_assignment(
 
     volunteer_row = volunteer_response.data[0]
 
-    # ---------------------------------------------------------------
-    # 4. Normalize volunteer
-    # ---------------------------------------------------------------
-
     volunteer = {
         "id": volunteer_row.get(
             "whalesync_postgres_id"
@@ -1770,10 +1936,6 @@ async def call_volunteer_for_assignment(
             "assignment_id": assignment_id,
             "volunteer_id": volunteer["id"],
         }
-
-    # ---------------------------------------------------------------
-    # 5. Build Vapi assignment payload
-    # ---------------------------------------------------------------
 
     vapi_assignment = {
         "assignment_id": assignment["id"],
@@ -1820,10 +1982,6 @@ async def call_volunteer_for_assignment(
         ),
     }
 
-    # ---------------------------------------------------------------
-    # 6. Place outbound Vapi call
-    # ---------------------------------------------------------------
-
     try:
 
         vapi_response = place_volunteer_call(
@@ -1841,10 +1999,6 @@ async def call_volunteer_for_assignment(
             "assignment_id": assignment_id,
             "error": str(error),
         }
-
-    # ---------------------------------------------------------------
-    # 7. Save Vapi call ID
-    # ---------------------------------------------------------------
 
     vapi_call_id = vapi_response.get("id")
 
@@ -1868,7 +2022,10 @@ async def call_volunteer_for_assignment(
         print(
             "=== DISPATCH ASSIGNMENT UPDATED ==="
         )
-        print(update_response.data)
+
+        print(
+            update_response.data
+        )
 
     return {
         "status": "call_initiated",
@@ -1899,10 +2056,6 @@ async def volunteer_response(
     print("=== MESSAGE TYPE ===")
     print(message.get("type"))
 
-    # ---------------------------------------------------------------
-    # End-of-call report
-    # ---------------------------------------------------------------
-
     if message.get("type") != "end-of-call-report":
         return {
             "status": "ignored",
@@ -1924,10 +2077,6 @@ async def volunteer_response(
     print("=== TRANSCRIPT ===")
     print(transcript)
 
-    # ---------------------------------------------------------------
-    # Extract assignment ID
-    # ---------------------------------------------------------------
-
     variable_values = (
         message
         .get("call", {})
@@ -1943,6 +2092,7 @@ async def volunteer_response(
     print(assignment_id)
 
     if not assignment_id:
+
         print(
             "WARNING: No assignment_id found."
         )
@@ -1952,10 +2102,6 @@ async def volunteer_response(
             "volunteer_outcome": "uncertain",
             "error": "assignment_id missing",
         }
-
-    # ---------------------------------------------------------------
-    # Determine volunteer response
-    # ---------------------------------------------------------------
 
     outcome = "uncertain"
 
@@ -1991,11 +2137,10 @@ async def volunteer_response(
                     print(
                         "=== VOLUNTEER RESPONSE ==="
                     )
-                    print(response)
 
-                    # -----------------------------------------------
-                    # ACCEPTED
-                    # -----------------------------------------------
+                    print(
+                        response
+                    )
 
                     if any(
                         phrase in response
@@ -2012,10 +2157,6 @@ async def volunteer_response(
                         ]
                     ):
                         outcome = "accepted"
-
-                    # -----------------------------------------------
-                    # DECLINED
-                    # -----------------------------------------------
 
                     elif any(
                         phrase in response
@@ -2034,12 +2175,13 @@ async def volunteer_response(
 
             break
 
-    print("=== VOLUNTEER OUTCOME ===")
-    print(outcome)
+    print(
+        "=== VOLUNTEER OUTCOME ==="
+    )
 
-    # ---------------------------------------------------------------
-    # Fetch assignment
-    # ---------------------------------------------------------------
+    print(
+        outcome
+    )
 
     assignment_response = (
         supabase
@@ -2057,10 +2199,6 @@ async def volunteer_response(
             f"Dispatch assignment not found: "
             f"{assignment_id}"
         )
-
-    # ---------------------------------------------------------------
-    # Fetch volunteer
-    # ---------------------------------------------------------------
 
     volunteer_id = assignment.get(
         "volunteer_id"
@@ -2101,12 +2239,13 @@ async def volunteer_response(
         ),
     }
 
-    print("=== VOLUNTEER ===")
-    print(volunteer)
+    print(
+        "=== VOLUNTEER ==="
+    )
 
-    # ---------------------------------------------------------------
-    # Update assignment outcome
-    # ---------------------------------------------------------------
+    print(
+        volunteer
+    )
 
     update_data = {
         "status": outcome,
@@ -2114,15 +2253,7 @@ async def volunteer_response(
         "updated_at": datetime.now().isoformat(),
     }
 
-    # ---------------------------------------------------------------
-    # Create calendar event ONLY if accepted
-    # ---------------------------------------------------------------
-
     if outcome == "accepted":
-
-        # -----------------------------------------------------------
-        # Prevent duplicate calendar invitations
-        # -----------------------------------------------------------
 
         existing_event_id = assignment.get(
             "calendar_event_id"
@@ -2133,7 +2264,10 @@ async def volunteer_response(
             print(
                 "=== CALENDAR EVENT ALREADY EXISTS ==="
             )
-            print(existing_event_id)
+
+            print(
+                existing_event_id
+            )
 
         else:
 
@@ -2167,18 +2301,22 @@ async def volunteer_response(
             print(
                 "=== CALENDAR EVENT CREATED ==="
             )
-            print(calendar_event_id)
-            print(calendar_event_url)
 
-    # ---------------------------------------------------------------
-    # Update Supabase
-    # ---------------------------------------------------------------
+            print(
+                calendar_event_id
+            )
+
+            print(
+                calendar_event_url
+            )
 
     print(
         "=== UPDATING DISPATCH ASSIGNMENT ==="
     )
 
-    print(update_data)
+    print(
+        update_data
+    )
 
     updated_assignment = (
         supabase
@@ -2192,7 +2330,9 @@ async def volunteer_response(
         "=== DISPATCH ASSIGNMENT UPDATED ==="
     )
 
-    print(updated_assignment.data)
+    print(
+        updated_assignment.data
+    )
 
     return {
         "status": "received",
