@@ -5,6 +5,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from app.services.tls import tls_verify
+
 
 load_dotenv()
 
@@ -57,55 +59,83 @@ def normalize_phone_number(phone: Any) -> str:
     )
 
 
-# -------------------------------------------------------------------
-# Place volunteer call
-# -------------------------------------------------------------------
+def phone_is_callable(phone: Any) -> bool:
+    """True when the number can actually be dialed (not missing or fictional)."""
+
+    try:
+        normalized = normalize_phone_number(phone)
+    except ValueError:
+        return False
+
+    digits = re.sub(r"\D", "", normalized)
+
+    if len(digits) == 11 and digits.startswith("1"):
+        national = digits[1:]
+    elif len(digits) == 10:
+        national = digits
+    else:
+        return False
+
+    # NANP 555 exchange numbers are reserved / fictional.
+    if national[3:6] == "555":
+        return False
+
+    return True
+
+
+def _post_vapi_call(payload: dict[str, Any]) -> dict[str, Any]:
+    if not VAPI_API_KEY:
+        raise RuntimeError("VAPI_API_KEY is not configured.")
+
+    if not VAPI_PHONE_NUMBER_ID:
+        raise RuntimeError("VAPI_PHONE_NUMBER_ID is not configured.")
+
+    response = requests.post(
+        VAPI_API_URL,
+        headers={
+            "Authorization": f"Bearer {VAPI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+        verify=tls_verify(),
+    )
+
+    print("=== VAPI STATUS ===")
+    print(response.status_code)
+    print("=== VAPI RESPONSE ===")
+    print(response.text)
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Vapi API error {response.status_code}: {response.text}"
+        )
+
+    return response.json()
+
 
 def place_volunteer_call(
     volunteer: dict[str, Any],
     assignment: dict[str, Any],
 ) -> dict[str, Any]:
 
-    if not VAPI_API_KEY:
-        raise RuntimeError(
-            "VAPI_API_KEY is not configured."
-        )
-
     if not VAPI_OUTREACH_ASSISTANT_ID:
         raise RuntimeError(
             "VAPI_OUTREACH_ASSISTANT_ID is not configured."
         )
 
-    if not VAPI_PHONE_NUMBER_ID:
-        raise RuntimeError(
-            "VAPI_PHONE_NUMBER_ID is not configured."
-        )
-
-    # ---------------------------------------------------------------
-    # Normalize volunteer phone number
-    # ---------------------------------------------------------------
-
-    phone = normalize_phone_number(
-        volunteer.get("phone")
-    )
+    phone = normalize_phone_number(volunteer.get("phone"))
 
     print("=== NORMALIZED VOLUNTEER PHONE ===")
     print(phone)
 
-    # ---------------------------------------------------------------
-    # Build Vapi payload
-    # ---------------------------------------------------------------
-
     payload = {
         "assistantId": VAPI_OUTREACH_ASSISTANT_ID,
-
         "phoneNumberId": VAPI_PHONE_NUMBER_ID,
-
         "customer": {
             "number": phone,
             "name": volunteer.get("name"),
         },
-
         "assistantOverrides": {
             "variableValues": {
 
@@ -195,34 +225,72 @@ def place_volunteer_call(
         },
     }
 
-    # ---------------------------------------------------------------
-    # Call Vapi
-    # ---------------------------------------------------------------
+    return _post_vapi_call(payload)
 
-    response = requests.post(
-        VAPI_API_URL,
-        headers={
-            "Authorization": f"Bearer {VAPI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30,
+
+def place_donor_notification_call(
+    donor: dict[str, Any],
+    volunteer: dict[str, Any],
+    assignment: dict[str, Any],
+) -> dict[str, Any]:
+    """Tell the donor a volunteer is on the way."""
+
+    phone = normalize_phone_number(
+        donor.get("phone") or donor.get("contact_phone")
+    )
+    donor_name = donor.get("name") or donor.get("contact_name") or "there"
+    volunteer_name = volunteer.get("name") or "a volunteer"
+    meals = assignment.get("meals_assigned") or 0
+    address = ", ".join(
+        part
+        for part in (
+            assignment.get("pickup_address"),
+            assignment.get("pickup_city"),
+        )
+        if part
+    ) or "the pickup address"
+    deadline = assignment.get("pickup_deadline") or "the listed pickup time"
+
+    first_message = (
+        f"Hi {donor_name}, this is Community Pilot. "
+        f"{volunteer_name} is on the way to pick up {meals} meals "
+        f"at {address}. Please have the food ready by {deadline}. "
+        "Thank you for donating."
     )
 
-    print("=== VAPI STATUS ===")
-    print(response.status_code)
+    assistant_id = (
+        os.getenv("VAPI_DONOR_ASSISTANT_ID") or VAPI_OUTREACH_ASSISTANT_ID
+    )
 
-    print("=== VAPI RESPONSE ===")
-    print(response.text)
+    if not assistant_id:
+        raise RuntimeError("No Vapi assistant is configured for donor calls.")
 
-    # ---------------------------------------------------------------
-    # Handle errors
-    # ---------------------------------------------------------------
+    print("=== DONOR NOTIFICATION CALL ===")
+    print(phone)
 
-    if not response.ok:
-        raise RuntimeError(
-            f"Vapi API error {response.status_code}: "
-            f"{response.text}"
-        )
+    payload = {
+        "assistantId": assistant_id,
+        "phoneNumberId": VAPI_PHONE_NUMBER_ID,
+        "customer": {
+            "number": phone,
+            "name": donor_name,
+        },
+        "maxDurationSeconds": 45,
+        "assistantOverrides": {
+            "firstMessage": first_message,
+            "variableValues": {
+                "call_role": "donor_notify",
+                "assignment_id": assignment.get("id")
+                or assignment.get("assignment_id")
+                or "",
+                "volunteer_name": volunteer_name,
+                "meals_assigned": str(meals),
+                "pickup_address": assignment.get("pickup_address") or "",
+                "pickup_city": assignment.get("pickup_city") or "",
+                "pickup_deadline": str(deadline),
+                "donor_name": donor_name,
+            },
+        },
+    }
 
-    return response.json()
+    return _post_vapi_call(payload)

@@ -53,7 +53,7 @@ class RoutingAgent:
         ).lower()
 
         if not transportation:
-            issues.append(
+            warnings.append(
                 "Volunteer transportation information is missing."
             )
 
@@ -83,9 +83,9 @@ class RoutingAgent:
         volunteer_capacity = volunteer.get(
             "capacity",
             0,
-        )
+        ) or 0
 
-        if meals_assigned > volunteer_capacity:
+        if volunteer_capacity and meals_assigned > volunteer_capacity:
             issues.append(
                 "Assigned meals exceed volunteer capacity."
             )

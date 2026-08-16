@@ -33,6 +33,7 @@ class CommunityIntelligenceAgent:
         community_need: dict[str, Any],
         shelter_system: dict[str, Any],
         weather: dict[str, Any],
+        expiring_donations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
 
         context = {
@@ -42,6 +43,7 @@ class CommunityIntelligenceAgent:
             "community_need": community_need,
             "shelter_system": shelter_system,
             "weather": weather,
+            "expiring_donations": expiring_donations or [],
         }
 
         response = self.client.chat.completions.create(
@@ -82,6 +84,8 @@ Important rules:
   Consider community need, demand, weather, and shelter
   pressure together.
 - If weather is unavailable, explicitly say so.
+- If expiring_donations is present, name the soonest pickups
+  and recommend matching them first.
 - Keep the recommendation practical and concise.
 
 Return valid JSON with exactly these fields:

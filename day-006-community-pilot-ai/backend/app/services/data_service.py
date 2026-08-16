@@ -140,7 +140,7 @@ def get_volunteers() -> list[dict[str, Any]]:
                     row.get(
                         "how_many_meals_or_food_packages_can_you_transport"
                     )
-                ),
+                ) or 25,
                 "available_from": row.get(
                     "when_are_you_available_from"
                 ),
@@ -194,6 +194,8 @@ def get_community_requests() -> list[dict[str, Any]]:
                 ),
                 "meals_needed": _to_int(
                     row.get("how_many_meals_are_currently_needed")
+                    or row.get("approximately_how_many_meals_are_needed")
+                    or row.get("meals")
                 ),
                 "urgency": row.get("how_urgent_is_this_request"),
                 "dietary_preferences": row.get(
@@ -296,9 +298,75 @@ def create_donation(data: dict[str, Any]) -> dict[str, Any]:
     return response.data[0]
 
 
-# -------------------------------------------------------------------
-# Dispatch Assignments
-# -------------------------------------------------------------------
+def create_community_request(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a food request from voice intake."""
+
+    request = {
+        "organization_name": data.get("organization_name"),
+        "timestamp": datetime.now().isoformat(),
+        "contact_name": data.get("contact_name"),
+        "contact_email": data.get("contact_email"),
+        "contact_phone": str(data.get("contact_phone") or data.get("phone") or ""),
+        "what_type_of_organization_are_you": data.get("organization_type"),
+        "how_many_meals_are_currently_needed": str(data.get("meals") or data.get("meals_needed") or ""),
+        "how_urgent_is_this_request": data.get("urgency") or "normal",
+        "are_there_dietary_preferences_or_requirements": data.get(
+            "dietary_preferences"
+        ),
+        "what_is_the_maximum_number_of_meals_you_can_currently_accept": str(
+            data.get("capacity") or data.get("meals") or ""
+        ),
+        "when_can_your_organization_receive_food": data.get("available_from"),
+        "pickup_delivery_address": data.get("address") or data.get("delivery_address"),
+        "city": data.get("city"),
+        "zip_code": str(data.get("zip_code") or ""),
+        "do_you_currently_accept_prepared_food_donations": (
+            "Yes" if data.get("accepts_prepared_food", True) else "No"
+        ),
+        "are_there_any_restrictions_or_instructions_for_food_deliveries": data.get(
+            "delivery_instructions"
+        ),
+    }
+
+    response = supabase.table(COMMUNITY_REQUESTS_TABLE).insert(request).execute()
+
+    if not response.data:
+        raise RuntimeError("Supabase did not return the created food request.")
+
+    return response.data[0]
+
+
+def create_volunteer(data: dict[str, Any]) -> dict[str, Any]:
+    """Create a volunteer signup from voice intake."""
+
+    volunteer = {
+        "full_name": data.get("name") or data.get("full_name"),
+        "timestamp": datetime.now().isoformat(),
+        "email": data.get("email"),
+        "phone_number": str(data.get("phone") or data.get("phone_number") or ""),
+        "what_transportation_do_you_have": data.get("transportation"),
+        "how_many_meals_or_food_packages_can_you_transport": str(
+            data.get("capacity") or 20
+        ),
+        "when_are_you_available_from": data.get("available_from"),
+        "when_are_you_available_until": data.get("available_until"),
+        "what_is_the_maximum_distance_you_re_comfortable_traveling": str(
+            data.get("max_distance") or 15
+        ),
+        "what_would_you_like_to_help_with": data.get("preferred_tasks")
+        or "pickup and delivery",
+        "starting_location_zip_code": str(data.get("zip_code") or ""),
+        "are_there_any_transportation_or_scheduling_limitations_we_shoul": data.get(
+            "limitations"
+        ),
+    }
+
+    response = supabase.table(VOLUNTEERS_TABLE).insert(volunteer).execute()
+
+    if not response.data:
+        raise RuntimeError("Supabase did not return the created volunteer.")
+
+    return response.data[0]
 
 DISPATCH_ASSIGNMENTS_TABLE = "Dispatch Assignment"
 
@@ -387,3 +455,9 @@ def update_dispatch_assignment(
         )
 
     return response.data[0]
+
+
+def get_dispatch_assignments() -> list[dict[str, Any]]:
+    """Return all dispatch assignment records."""
+
+    return _get_rows(DISPATCH_ASSIGNMENTS_TABLE)

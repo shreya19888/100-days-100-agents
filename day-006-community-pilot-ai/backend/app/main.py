@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any
+import json
 import os
 import requests
 
@@ -14,24 +15,38 @@ from app.services.calendar_service import (
     create_volunteer_calendar_event,
 )
 
-from app.agents.coordinator import CoordinatorAgent
-from app.agents.matching_agent import MatchingAgent
-from app.agents.routing_agent import RoutingAgent
-from app.agents.volunteer_outreach_agent import (
-    VolunteerOutreachAgent,
-)
 from app.agents.community_intelligence_agent import (
     CommunityIntelligenceAgent,
 )
 
 from app.services.data_service import (
+    create_community_request,
     create_donation,
+    create_volunteer,
     get_donations,
     get_volunteers,
     get_community_requests,
-    create_dispatch_assignment,
-    update_dispatch_assignment,
 )
+
+from app.services.dispatch_service import (
+    complete_dispatch_assignment,
+    initiate_volunteer_call,
+    mark_assignment_picked_up,
+    notify_donor_volunteer_en_route,
+    reassign_after_decline,
+    record_volunteer_decline,
+    resolve_volunteer,
+    run_dispatch_outreach,
+    run_dispatch_plan,
+)
+from app.services.assignment_status import (
+    IN_TRANSIT_STATUSES,
+    assignment_is_claimed,
+    assignment_keeps_volunteer_busy,
+)
+from app.services.time_window import expiry_payload
+from app.services.routing_service import coordinates_for_zip
+from app.services.tls import tls_verify
 
 load_dotenv()
 
@@ -205,6 +220,31 @@ async def intelligence():
         "pressure": pressure,
     }
 
+    expiring_donations = []
+
+    for donation in get_donations():
+        expiry = expiry_payload(donation)
+        minutes = expiry.get("minutes_remaining")
+
+        if minutes is None or minutes < 0 or minutes > 180:
+            continue
+
+        expiring_donations.append(
+            {
+                "id": donation.get("id"),
+                "name": donation.get("restaurant_name"),
+                "meals": donation.get("meals"),
+                "city": donation.get("city"),
+                "pickup_deadline": donation.get("pickup_deadline"),
+                "minutes_remaining": minutes,
+            }
+        )
+
+    expiring_donations.sort(
+        key=lambda item: item.get("minutes_remaining") or 9999
+    )
+    expiring_donations = expiring_donations[:5]
+
     # ---------------------------------------------------------------
     # Public San Francisco homelessness snapshot
     #
@@ -359,6 +399,7 @@ async def intelligence():
             community_need=community_need,
             shelter_system=shelter_system,
             weather=weather,
+            expiring_donations=expiring_donations,
         )
 
     except Exception as error:
@@ -394,6 +435,7 @@ async def intelligence():
         "community_need": community_need,
         "shelter_system": shelter_system,
         "weather": weather,
+        "expiring_donations": expiring_donations,
         "coordination_signal": coordination_signal,
     }
 
@@ -449,36 +491,79 @@ async def dashboard():
     volunteers = volunteers_response.data or []
     assignments = assignments_response.data or []
 
-    donation_lookup = {
-        str(donation.get("whalesync_postgres_id")): donation
-        for donation in donations
-        if donation.get("whalesync_postgres_id")
-    }
-
-    request_lookup = {
-        str(request.get("whalesync_postgres_id")): request
-        for request in requests
-        if request.get("whalesync_postgres_id")
-    }
-
-    volunteer_lookup = {
-        str(volunteer.get("whalesync_postgres_id")): volunteer
-        for volunteer in volunteers
-        if volunteer.get("whalesync_postgres_id")
-    }
-
-    meals_rescued = 0
+    donation_lookup: dict[str, Any] = {}
+    request_lookup: dict[str, Any] = {}
+    volunteer_lookup: dict[str, Any] = {}
 
     for donation in donations:
+        for key in (
+            donation.get("whalesync_postgres_id"),
+            donation.get("google_sheets_record_id"),
+        ):
+            if key:
+                donation_lookup[str(key)] = donation
+
+    for request in requests:
+        for key in (
+            request.get("whalesync_postgres_id"),
+            request.get("google_sheets_record_id"),
+        ):
+            if key:
+                request_lookup[str(key)] = request
+
+    for volunteer in volunteers:
+        for key in (
+            volunteer.get("whalesync_postgres_id"),
+            volunteer.get("google_sheets_record_id"),
+        ):
+            if key:
+                volunteer_lookup[str(key)] = volunteer
+
+    claimed_donation_ids = {
+        str(assignment.get("donation_id"))
+        for assignment in assignments
+        if assignment.get("donation_id")
+        and assignment_is_claimed(assignment)
+        and str(assignment.get("volunteer_id") or "") in volunteer_lookup
+    }
+
+    declined_donation_ids = {
+        str(assignment.get("donation_id"))
+        for assignment in assignments
+        if assignment.get("donation_id")
+        and (
+            (assignment.get("volunteer_outcome") or "").lower()
+            == "declined"
+            or (assignment.get("status") or "").lower()
+            in ("declined", "needs_reassignment")
+        )
+    }
+
+    meals_at_donor = 0
+
+    for donation in donations:
+        donation_id = str(
+            donation.get("whalesync_postgres_id") or ""
+        )
+
+        if not donation_id or donation_id in claimed_donation_ids:
+            continue
+
         value = donation.get(
             "approximately_how_many_meals_or_servings_are_available",
             0,
         )
 
         try:
-            meals_rescued += int(value)
+            meals_at_donor += int(value or 0)
         except (TypeError, ValueError):
             pass
+
+    meals_in_transit = sum(
+        assignment.get("meals_assigned", 0) or 0
+        for assignment in assignments
+        if (assignment.get("status") or "").lower() in IN_TRANSIT_STATUSES
+    )
 
     meals_delivered = sum(
         assignment.get("meals_assigned", 0) or 0
@@ -492,11 +577,7 @@ async def dashboard():
     active_dispatches = sum(
         1
         for assignment in assignments
-        if assignment.get("status") not in [
-            "delivered",
-            "completed",
-            "cancelled",
-        ]
+        if assignment_keeps_volunteer_busy(assignment)
     )
 
     enriched_assignments = []
@@ -587,6 +668,37 @@ async def dashboard():
                 "phone": volunteer_phone,
             },
 
+            **expiry_payload(
+                {
+                    "pickup_deadline": assignment.get("pickup_deadline")
+                    or (
+                        donation.get(
+                            "what_is_the_latest_time_the_food_can_be_picked_up"
+                        )
+                        if donation
+                        else None
+                    ),
+                    "created_at": assignment.get("created_at")
+                    or (
+                        donation.get("timestamp") if donation else None
+                    ),
+                }
+            ),
+
+            "route": {
+                "volunteer": coordinates_for_zip(
+                    volunteer.get("starting_location_zip_code")
+                    if volunteer
+                    else None
+                ),
+                "pickup": coordinates_for_zip(
+                    donation.get("zip_code") if donation else None
+                ),
+                "delivery": coordinates_for_zip(
+                    request.get("zip_code") if request else None
+                ),
+            },
+
             "workflow": {
                 "form_submitted": bool(
                     assignment.get("donation_id")
@@ -605,10 +717,8 @@ async def dashboard():
                 ),
 
                 "pickup_confirmed": (
-                    assignment.get(
-                        "volunteer_outcome"
-                    )
-                    == "accepted"
+                    (assignment.get("status") or "").lower()
+                    in ("picked_up", "in_transit", "delivered", "completed")
                 ),
 
                 "delivery_scheduled": bool(
@@ -684,13 +794,20 @@ async def dashboard():
     # scrolling. Do not truncate here.
     # ---------------------------------------------------------------
 
-    assigned_donation_ids = {
-        str(assignment.get("donation_id"))
-        for assignment in assignments
-        if assignment.get("donation_id")
-    }
+    assigned_donation_ids = claimed_donation_ids
 
-    rescue_queue = list(enriched_assignments)
+    rescue_queue = [
+        assignment
+        for assignment in enriched_assignments
+        if (assignment.get("status") or "").lower()
+        not in ("declined", "needs_reassignment")
+        and (assignment.get("volunteer_outcome") or "").lower()
+        != "declined"
+        and (
+            not assignment.get("volunteer_id")
+            or str(assignment.get("volunteer_id")) in volunteer_lookup
+        )
+    ]
 
     for donation in donations:
         donation_id = str(
@@ -710,15 +827,35 @@ async def dashboard():
         except (TypeError, ValueError):
             meals_available = 0
 
+        match_pending = donation_id in declined_donation_ids
+
         rescue_queue.append({
             "id": f"donation-{donation_id}",
-            "status": "needs_dispatch",
+            "status": (
+                "match_pending" if match_pending else "needs_dispatch"
+            ),
             "volunteer_outcome": None,
             "meals_assigned": meals_available,
             "pickup_address": donation.get("pickup_address"),
             "pickup_city": donation.get("city"),
+            "pickup_deadline": donation.get(
+                "what_is_the_latest_time_the_food_can_be_picked_up"
+            ),
             "created_at": donation.get("timestamp"),
             "updated_at": donation.get("timestamp"),
+            **expiry_payload(
+                {
+                    "pickup_deadline": donation.get(
+                        "what_is_the_latest_time_the_food_can_be_picked_up"
+                    ),
+                    "created_at": donation.get("timestamp"),
+                }
+            ),
+            "route": {
+                "volunteer": None,
+                "pickup": coordinates_for_zip(donation.get("zip_code")),
+                "delivery": None,
+            },
             "donor": {
                 "name": donation.get("restaurant_business_name"),
                 "contact": donation.get("contact_name"),
@@ -745,17 +882,20 @@ async def dashboard():
 
     rescue_queue = sorted(
         rescue_queue,
-        key=lambda x: (
-            x.get("updated_at")
-            or x.get("created_at")
-            or ""
+        key=lambda item: (
+            0 if item.get("minutes_remaining") is not None else 1,
+            item.get("minutes_remaining")
+            if item.get("minutes_remaining") is not None
+            else 9999,
+            str(item.get("updated_at") or item.get("created_at") or ""),
         ),
-        reverse=True,
     )
 
     return {
         "stats": {
-            "meals_rescued": meals_rescued,
+            "meals_rescued": meals_delivered,
+            "meals_at_donor": meals_at_donor,
+            "meals_in_transit": meals_in_transit,
             "meals_delivered": meals_delivered,
             "active_dispatches": active_dispatches,
             "volunteers": len(volunteers),
@@ -802,6 +942,7 @@ async def volunteer_call(call_id: str):
                 "Authorization": f"Bearer {api_key}",
             },
             timeout=10,
+            verify=tls_verify(),
         )
 
         if not response.ok:
@@ -1127,6 +1268,12 @@ async def create_voice_donation(
         function_name = function.get("name")
         arguments = function.get("arguments", {})
 
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+
         print("=== TOOL CALL ID ===")
         print(tool_call_id)
 
@@ -1136,48 +1283,52 @@ async def create_voice_donation(
         print("=== ARGUMENTS ===")
         print(arguments)
 
-        if function_name == "create_food_donation":
-
-            try:
-                donation = create_donation(arguments)
-
-                print("=== DONATION CREATED ===")
-                print(donation)
-
-                results.append(
-                    {
-                        "toolCallId": tool_call_id,
-                        "result": (
-                            "The food donation was successfully "
-                            "recorded in Community Pilot."
-                        ),
-                    }
+        try:
+            if function_name == "create_food_donation":
+                create_donation(arguments)
+                result_text = (
+                    "The food donation was successfully recorded "
+                    "in Community Pilot."
                 )
-
-            except Exception as error:
-
-                print("=== DONATION ERROR ===")
-                print(repr(error))
-
-                results.append(
-                    {
-                        "toolCallId": tool_call_id,
-                        "result": (
-                            "The food donation could not be "
-                            "recorded right now."
-                        ),
-                    }
+            elif function_name in (
+                "create_food_request",
+                "create_community_request",
+            ):
+                create_community_request(arguments)
+                result_text = (
+                    "The food request was successfully recorded "
+                    "in Community Pilot."
                 )
-
-        else:
-
-            print("=== UNKNOWN TOOL ===")
-            print(function_name)
+            elif function_name in (
+                "create_volunteer",
+                "create_volunteer_signup",
+            ):
+                create_volunteer(arguments)
+                result_text = (
+                    "The volunteer was successfully registered "
+                    "with Community Pilot."
+                )
+            else:
+                print("=== UNKNOWN TOOL ===")
+                print(function_name)
+                result_text = "Unknown tool."
 
             results.append(
                 {
                     "toolCallId": tool_call_id,
-                    "result": "Unknown tool.",
+                    "result": result_text,
+                }
+            )
+
+        except Exception as error:
+            print("=== VOICE TOOL ERROR ===")
+            print(repr(error))
+            results.append(
+                {
+                    "toolCallId": tool_call_id,
+                    "result": (
+                        "That record could not be saved right now."
+                    ),
                 }
             )
 
@@ -1195,162 +1346,7 @@ async def create_voice_donation(
 
 @app.post("/api/dispatch")
 async def dispatch():
-
-    donations = get_donations()
-    volunteers = get_volunteers()
-    requests = get_community_requests()
-
-    if not donations:
-        return {
-            "status": "no_donations",
-            "message": (
-                "No food donations are currently available."
-            ),
-        }
-
-    if not volunteers:
-        return {
-            "status": "no_volunteers",
-            "message": (
-                "No volunteers are currently available."
-            ),
-        }
-
-    if not requests:
-        return {
-            "status": "no_requests",
-            "message": (
-                "No community food requests are currently available."
-            ),
-        }
-
-    matching_agent = MatchingAgent()
-
-    matches = matching_agent.find_matches(
-        donations=donations,
-        requests=requests,
-        volunteers=volunteers,
-    )
-
-    if not matches:
-        return {
-            "status": "no_matches",
-            "message": (
-                "No compatible donation, community request, "
-                "and volunteer combination was found."
-            ),
-        }
-
-    routing_agent = RoutingAgent()
-
-    routed_matches = []
-
-    for match in matches:
-
-        donation = next(
-            (
-                donation
-                for donation in donations
-                if donation["id"] == match["donation_id"]
-            ),
-            None,
-        )
-
-        request = next(
-            (
-                request
-                for request in requests
-                if request["id"] == match["request_id"]
-            ),
-            None,
-        )
-
-        if not donation or not request:
-            continue
-
-        route_results = []
-
-        for volunteer_match in match["volunteers"]:
-
-            volunteer = next(
-                (
-                    volunteer
-                    for volunteer in volunteers
-                    if volunteer["id"]
-                    == volunteer_match["volunteer_id"]
-                ),
-                None,
-            )
-
-            if not volunteer:
-                continue
-
-            route = routing_agent.evaluate_route(
-                volunteer=volunteer,
-                donation=donation,
-                request=request,
-                meals_assigned=volunteer_match[
-                    "meals_assigned"
-                ],
-            )
-
-            route_results.append(route)
-
-        routed_matches.append(
-            {
-                **match,
-                "routes": route_results,
-            }
-        )
-
-    coordinator = CoordinatorAgent()
-
-    plans = []
-
-    for match in routed_matches:
-
-        donation = next(
-            (
-                donation
-                for donation in donations
-                if donation["id"] == match["donation_id"]
-            ),
-            None,
-        )
-
-        request = next(
-            (
-                request
-                for request in requests
-                if request["id"] == match["request_id"]
-            ),
-            None,
-        )
-
-        if not donation or not request:
-            continue
-
-        plan = coordinator.create_plan(
-            donation=donation,
-            request=request,
-            match=match,
-        )
-
-        plan["routes"] = match["routes"]
-
-        plans.append(plan)
-
-    return {
-        "status": "dispatch_plan_created",
-        "plans": plans,
-        "summary": {
-            "donations_evaluated": len(donations),
-            "requests_evaluated": len(requests),
-            "volunteers_evaluated": len(volunteers),
-            "matches_found": len(matches),
-            "plans_created": len(plans),
-        },
-    }
+    return run_dispatch_plan()
 
 
 # -------------------------------------------------------------------
@@ -1359,467 +1355,7 @@ async def dispatch():
 
 @app.post("/api/dispatch/outreach")
 async def dispatch_outreach():
-
-    # ---------------------------------------------------------------
-    # 1. Load live data
-    # ---------------------------------------------------------------
-
-    donations = get_donations()
-    volunteers = get_volunteers()
-    requests = get_community_requests()
-
-    if not donations:
-        return {
-            "status": "no_donations",
-            "message": (
-                "No food donations are currently available."
-            ),
-        }
-
-    if not volunteers:
-        return {
-            "status": "no_volunteers",
-            "message": (
-                "No volunteers are currently available."
-            ),
-        }
-
-    if not requests:
-        return {
-            "status": "no_requests",
-            "message": (
-                "No community food requests are currently available."
-            ),
-        }
-
-    # ---------------------------------------------------------------
-    # 2. Matching Agent
-    # ---------------------------------------------------------------
-
-    matching_agent = MatchingAgent()
-
-    matches = matching_agent.find_matches(
-        donations=donations,
-        requests=requests,
-        volunteers=volunteers,
-    )
-
-    if not matches:
-        return {
-            "status": "no_matches",
-            "message": "No dispatch matches were found.",
-        }
-
-    # ---------------------------------------------------------------
-    # 3. Routing + Coordinator
-    # ---------------------------------------------------------------
-
-    routing_agent = RoutingAgent()
-    coordinator = CoordinatorAgent()
-    outreach_agent = VolunteerOutreachAgent()
-
-    plans = []
-
-    for match in matches:
-
-        donation = next(
-            (
-                donation
-                for donation in donations
-                if donation["id"] == match["donation_id"]
-            ),
-            None,
-        )
-
-        request = next(
-            (
-                request
-                for request in requests
-                if request["id"] == match["request_id"]
-            ),
-            None,
-        )
-
-        if not donation or not request:
-            continue
-
-        routes = []
-
-        for volunteer_match in match["volunteers"]:
-
-            volunteer = next(
-                (
-                    volunteer
-                    for volunteer in volunteers
-                    if volunteer["id"]
-                    == volunteer_match["volunteer_id"]
-                ),
-                None,
-            )
-
-            if not volunteer:
-                continue
-
-            route = routing_agent.evaluate_route(
-                volunteer=volunteer,
-                donation=donation,
-                request=request,
-                meals_assigned=volunteer_match[
-                    "meals_assigned"
-                ],
-            )
-
-            routes.append(route)
-
-        routed_match = {
-            **match,
-            "routes": routes,
-        }
-
-        plan = coordinator.create_plan(
-            donation=donation,
-            request=request,
-            match=routed_match,
-        )
-
-        plan["routes"] = routes
-
-        # -----------------------------------------------------------
-        # 4. Prepare volunteer outreach
-        # -----------------------------------------------------------
-
-        outreach_volunteers = []
-
-        for volunteer_match in match["volunteers"]:
-
-            volunteer = next(
-                (
-                    volunteer
-                    for volunteer in volunteers
-                    if volunteer["id"]
-                    == volunteer_match["volunteer_id"]
-                ),
-                None,
-            )
-
-            if not volunteer:
-                continue
-
-            outreach_volunteers.append(
-                {
-                    **volunteer_match,
-
-                    "phone": volunteer.get(
-                        "phone",
-                        volunteer.get(
-                            "phone_number"
-                        ),
-                    ),
-
-                    "email": volunteer.get(
-                        "email"
-                    ),
-
-                    "name": volunteer.get(
-                        "name",
-                        volunteer.get(
-                            "full_name"
-                        ),
-                    ),
-
-                    "id": volunteer.get(
-                        "id",
-                        volunteer.get(
-                            "whalesync_postgres_id"
-                        ),
-                    ),
-                }
-            )
-
-        plan["delivery"]["volunteers"] = (
-            outreach_volunteers
-        )
-
-        # -----------------------------------------------------------
-        # 5. Create persistent dispatch assignments
-        # -----------------------------------------------------------
-
-        assignments = []
-
-        for volunteer_match in outreach_volunteers:
-
-            assignment_data = {
-                "donation_id": donation["id"],
-                "request_id": request["id"],
-                "volunteer_id": volunteer_match[
-                    "volunteer_id"
-                ],
-                "meals_assigned": volunteer_match.get(
-                    "meals_assigned",
-                    0,
-                ),
-                "pickup_address": donation.get(
-                    "pickup_address",
-                    "",
-                ),
-                "pickup_city": donation.get(
-                    "city",
-                    "",
-                ),
-                "pickup_deadline": donation.get(
-                    "pickup_deadline",
-                    "",
-                ),
-                "delivery_organization": request.get(
-                    "organization_name",
-                    "",
-                ),
-                "delivery_address": request.get(
-                    "address",
-                    "",
-                ),
-                "delivery_city": request.get(
-                    "city",
-                    "",
-                ),
-                "delivery_instructions": request.get(
-                    "delivery_instructions",
-                    "",
-                ),
-            }
-
-            assignment = create_dispatch_assignment(
-                assignment_data
-            )
-
-            # -------------------------------------------------------
-            # Automatically place volunteer AI call
-            # -------------------------------------------------------
-
-            call_status = "not_attempted"
-            vapi_call_id = None
-            call_error = None
-
-            try:
-
-                call_volunteer = {
-                    "id": volunteer_match.get(
-                        "id",
-                        volunteer_match.get(
-                            "volunteer_id"
-                        ),
-                    ),
-
-                    "name": volunteer_match.get(
-                        "name",
-                        volunteer_match.get(
-                            "volunteer_name"
-                        ),
-                    ),
-
-                    "email": volunteer_match.get(
-                        "email"
-                    ),
-
-                    "phone": volunteer_match.get(
-                        "phone"
-                    ),
-                }
-
-                if not call_volunteer["phone"]:
-
-                    call_status = "missing_phone"
-
-                    call_error = (
-                        "Volunteer does not have "
-                        "a phone number."
-                    )
-
-                else:
-
-                    vapi_assignment = {
-                        "assignment_id": assignment["id"],
-                        "donation_id": assignment.get(
-                            "donation_id"
-                        ),
-                        "request_id": assignment.get(
-                            "request_id"
-                        ),
-                        "volunteer_id": assignment.get(
-                            "volunteer_id"
-                        ),
-                        "meals_assigned": assignment.get(
-                            "meals_assigned",
-                            0,
-                        ),
-                        "pickup_address": assignment.get(
-                            "pickup_address",
-                            "",
-                        ),
-                        "pickup_city": assignment.get(
-                            "pickup_city",
-                            "",
-                        ),
-                        "pickup_deadline": assignment.get(
-                            "pickup_deadline",
-                            "",
-                        ),
-                        "delivery_organization": assignment.get(
-                            "delivery_organization",
-                            "",
-                        ),
-                        "delivery_address": assignment.get(
-                            "delivery_address",
-                            "",
-                        ),
-                        "delivery_city": assignment.get(
-                            "delivery_city",
-                            "",
-                        ),
-                        "delivery_instructions": assignment.get(
-                            "delivery_instructions",
-                            "",
-                        ),
-                    }
-
-                    print(
-                        "=== AUTOMATIC VOLUNTEER OUTREACH ==="
-                    )
-
-                    print(
-                        f"Calling "
-                        f"{call_volunteer['name']} "
-                        f"at "
-                        f"{call_volunteer['phone']}"
-                    )
-
-                    vapi_response = place_volunteer_call(
-                        volunteer=call_volunteer,
-                        assignment=vapi_assignment,
-                    )
-
-                    vapi_call_id = (
-                        vapi_response.get("id")
-                    )
-
-                    if vapi_call_id:
-
-                        supabase.table(
-                            "Dispatch Assignment"
-                        ).update(
-                            {
-                                "vapi_call_id": vapi_call_id,
-                                "updated_at": (
-                                    datetime.now()
-                                    .isoformat()
-                                ),
-                            }
-                        ).eq(
-                            "id",
-                            assignment["id"],
-                        ).execute()
-
-                        call_status = (
-                            "call_initiated"
-                        )
-
-                        print(
-                            "=== VAPI CALL INITIATED ==="
-                        )
-
-                        print(
-                            vapi_call_id
-                        )
-
-                    else:
-
-                        call_status = "call_failed"
-
-                        call_error = (
-                            "Vapi returned "
-                            "no call ID."
-                        )
-
-            except Exception as error:
-
-                print(
-                    "=== AUTOMATIC VAPI "
-                    "OUTREACH ERROR ==="
-                )
-
-                print(
-                    repr(error)
-                )
-
-                call_status = "call_failed"
-
-                call_error = str(error)
-
-            assignments.append(
-                {
-                    "assignment_id": assignment["id"],
-                    "volunteer_id": volunteer_match[
-                        "volunteer_id"
-                    ],
-                    "volunteer_name": volunteer_match.get(
-                        "volunteer_name",
-                        volunteer_match.get(
-                            "name"
-                        ),
-                    ),
-                    "phone": volunteer_match.get(
-                        "phone"
-                    ),
-                    "email": volunteer_match.get(
-                        "email"
-                    ),
-                    "meals_assigned": volunteer_match.get(
-                        "meals_assigned",
-                        0,
-                    ),
-                    "status": (
-                        "outreach_in_progress"
-                        if call_status
-                        == "call_initiated"
-                        else assignment["status"]
-                    ),
-                    "call_status": call_status,
-                    "vapi_call_id": vapi_call_id,
-                    "call_error": call_error,
-                }
-            )
-
-        # -----------------------------------------------------------
-        # 6. Prepare outreach messages
-        # -----------------------------------------------------------
-
-        outreach = outreach_agent.prepare_outreach(
-            plan
-        )
-
-        plans.append(
-            {
-                "plan": plan,
-                "assignments": assignments,
-                "outreach": outreach,
-            }
-        )
-
-    return {
-        "status": "outreach_ready",
-        "plans": plans,
-        "summary": {
-            "plans_created": len(plans),
-            "assignments_created": sum(
-                len(plan["assignments"])
-                for plan in plans
-            ),
-            "volunteers_to_contact": sum(
-                len(plan["outreach"])
-                for plan in plans
-            ),
-        },
-    }
+    return run_dispatch_outreach()
 
 
 # -------------------------------------------------------------------
@@ -1887,156 +1423,90 @@ async def call_volunteer_for_assignment(
 
     assignment = response.data[0]
 
-    if assignment.get("vapi_call_id"):
-        return {
-            "status": "already_called",
-            "assignment_id": assignment_id,
-            "vapi_call_id": assignment["vapi_call_id"],
-        }
+    volunteer = resolve_volunteer(assignment.get("volunteer_id"))
 
-    volunteer_response = (
-        supabase
-        .table("Volunteer Signup")
-        .select("*")
-        .eq(
-            "whalesync_postgres_id",
-            assignment["volunteer_id"],
-        )
-        .limit(1)
-        .execute()
-    )
-
-    if not volunteer_response.data:
+    if not volunteer:
+        print("=== VOLUNTEER NOT FOUND FOR CALL ===")
+        print(assignment.get("volunteer_id"))
         return {
             "status": "volunteer_not_found",
+            "message": (
+                "That volunteer is no longer in the registry. "
+                "Run AI matching to assign someone else."
+            ),
             "assignment_id": assignment_id,
-            "volunteer_id": assignment["volunteer_id"],
+            "volunteer_id": assignment.get("volunteer_id"),
         }
 
-    volunteer_row = volunteer_response.data[0]
-
-    volunteer = {
-        "id": volunteer_row.get(
-            "whalesync_postgres_id"
-        ),
-        "name": volunteer_row.get(
-            "full_name"
-        ),
-        "email": volunteer_row.get(
-            "email"
-        ),
-        "phone": volunteer_row.get(
-            "phone_number"
-        ),
+    contact = {
+        "id": volunteer.get("id"),
+        "name": volunteer.get("name") or volunteer.get("full_name"),
+        "email": volunteer.get("email"),
+        "phone": volunteer.get("phone") or volunteer.get("phone_number"),
     }
 
-    if not volunteer["phone"]:
+    if not contact["phone"]:
         return {
             "status": "missing_phone",
+            "message": "That volunteer does not have a phone number.",
             "assignment_id": assignment_id,
-            "volunteer_id": volunteer["id"],
+            "volunteer_id": contact["id"],
         }
 
-    vapi_assignment = {
-        "assignment_id": assignment["id"],
-        "donation_id": assignment.get(
-            "donation_id"
-        ),
-        "request_id": assignment.get(
-            "request_id"
-        ),
-        "volunteer_id": assignment.get(
-            "volunteer_id"
-        ),
-        "meals_assigned": assignment.get(
-            "meals_assigned",
-            0,
-        ),
-        "pickup_address": assignment.get(
-            "pickup_address",
-            "",
-        ),
-        "pickup_city": assignment.get(
-            "pickup_city",
-            "",
-        ),
-        "pickup_deadline": assignment.get(
-            "pickup_deadline",
-            "",
-        ),
-        "delivery_organization": assignment.get(
-            "delivery_organization",
-            "",
-        ),
-        "delivery_address": assignment.get(
-            "delivery_address",
-            "",
-        ),
-        "delivery_city": assignment.get(
-            "delivery_city",
-            "",
-        ),
-        "delivery_instructions": assignment.get(
-            "delivery_instructions",
-            "",
-        ),
-    }
+    call_result = initiate_volunteer_call(
+        assignment,
+        contact,
+    )
 
-    try:
+    if call_result["call_status"] == "missing_phone":
+        return {
+            "status": "missing_phone",
+            "message": "That volunteer does not have a phone number.",
+            "assignment_id": assignment_id,
+            "volunteer_id": contact["id"],
+        }
 
-        vapi_response = place_volunteer_call(
-            volunteer=volunteer,
-            assignment=vapi_assignment,
-        )
-
-    except Exception as error:
-
-        print("=== VAPI OUTREACH ERROR ===")
-        print(repr(error))
-
+    if call_result["call_status"] == "call_failed":
         return {
             "status": "call_failed",
+            "message": (
+                call_result.get("call_error")
+                or "The volunteer call could not be placed."
+            ),
             "assignment_id": assignment_id,
-            "error": str(error),
+            "error": call_result.get("call_error"),
         }
-
-    vapi_call_id = vapi_response.get("id")
-
-    if vapi_call_id:
-
-        update_response = (
-            supabase
-            .table("Dispatch Assignment")
-            .update(
-                {
-                    "vapi_call_id": vapi_call_id,
-                    "updated_at": (
-                        datetime.now().isoformat()
-                    ),
-                }
-            )
-            .eq("id", assignment_id)
-            .execute()
-        )
-
-        print(
-            "=== DISPATCH ASSIGNMENT UPDATED ==="
-        )
-
-        print(
-            update_response.data
-        )
 
     return {
         "status": "call_initiated",
         "assignment_id": assignment_id,
         "volunteer": {
-            "id": volunteer["id"],
-            "name": volunteer["name"],
-            "phone": volunteer["phone"],
+            "id": contact["id"],
+            "name": contact["name"],
+            "phone": contact["phone"],
         },
-        "vapi": vapi_response,
+        "vapi": call_result.get("vapi"),
+        "vapi_call_id": call_result.get("vapi_call_id"),
     }
+
+
+# -------------------------------------------------------------------
+# Confirm delivery
+# -------------------------------------------------------------------
+
+@app.post("/api/dispatch/{assignment_id}/complete")
+async def complete_assignment(assignment_id: str):
+    return complete_dispatch_assignment(assignment_id)
+
+
+@app.post("/api/dispatch/{assignment_id}/pickup")
+async def pickup_assignment(assignment_id: str):
+    return mark_assignment_picked_up(assignment_id)
+
+
+@app.post("/api/dispatch/{assignment_id}/decline")
+async def decline_assignment(assignment_id: str):
+    return record_volunteer_decline(assignment_id)
 
 
 # -------------------------------------------------------------------
@@ -2087,6 +1557,12 @@ async def volunteer_response(
     assignment_id = variable_values.get(
         "assignment_id"
     )
+
+    if variable_values.get("call_role") == "donor_notify":
+        return {
+            "status": "ignored",
+            "reason": "donor_notify",
+        }
 
     print("=== ASSIGNMENT ID ===")
     print(assignment_id)
@@ -2175,6 +1651,32 @@ async def volunteer_response(
 
             break
 
+    ended_reason = str(
+        message.get("endedReason")
+        or message.get("call", {}).get("endedReason")
+        or ""
+    ).lower()
+
+    user_spoke = any(
+        (msg.get("role") == "user" and str(msg.get("message") or "").strip())
+        for msg in messages
+    )
+
+    no_answer_markers = (
+        "did-not-answer",
+        "no-answer",
+        "voicemail",
+        "customer-busy",
+        "busy",
+        "silence-timed-out",
+    )
+
+    if outcome == "uncertain" and (
+        not user_spoke
+        or any(marker in ended_reason for marker in no_answer_markers)
+    ):
+        outcome = "no_answer"
+
     print(
         "=== VOLUNTEER OUTCOME ==="
     )
@@ -2200,60 +1702,65 @@ async def volunteer_response(
             f"{assignment_id}"
         )
 
-    volunteer_id = assignment.get(
-        "volunteer_id"
-    )
-
-    volunteer_response = (
-        supabase
-        .table("Volunteer Signup")
-        .select("*")
-        .eq(
-            "whalesync_postgres_id",
-            volunteer_id,
-        )
-        .single()
-        .execute()
-    )
-
-    volunteer_row = volunteer_response.data
-
-    if not volunteer_row:
-        raise RuntimeError(
-            f"Volunteer not found: "
-            f"{volunteer_id}"
-        )
-
-    volunteer = {
-        "id": volunteer_row.get(
-            "whalesync_postgres_id"
-        ),
-        "name": volunteer_row.get(
-            "full_name"
-        ),
-        "email": volunteer_row.get(
-            "email"
-        ),
-        "phone": volunteer_row.get(
-            "phone_number"
-        ),
+    status_map = {
+        "accepted": "accepted",
+        "declined": "needs_reassignment",
+        "no_answer": "needs_reassignment",
+        "uncertain": "outreach_uncertain",
     }
 
-    print(
-        "=== VOLUNTEER ==="
-    )
-
-    print(
-        volunteer
-    )
-
     update_data = {
-        "status": outcome,
+        "status": status_map.get(
+            outcome,
+            "outreach_uncertain",
+        ),
         "volunteer_outcome": outcome,
         "updated_at": datetime.now().isoformat(),
     }
 
     if outcome == "accepted":
+
+        volunteer_id = assignment.get(
+            "volunteer_id"
+        )
+
+        volunteer_response = (
+            supabase
+            .table("Volunteer Signup")
+            .select("*")
+            .eq(
+                "whalesync_postgres_id",
+                volunteer_id,
+            )
+            .single()
+            .execute()
+        )
+
+        volunteer_row = volunteer_response.data
+
+        if not volunteer_row:
+            raise RuntimeError(
+                f"Volunteer not found: "
+                f"{volunteer_id}"
+            )
+
+        volunteer = {
+            "id": volunteer_row.get(
+                "whalesync_postgres_id"
+            ),
+            "name": volunteer_row.get(
+                "full_name"
+            ),
+            "email": volunteer_row.get(
+                "email"
+            ),
+            "phone": volunteer_row.get(
+                "phone_number"
+            ),
+        }
+
+        print("=== VOLUNTEER ===")
+        print(volunteer)
 
         existing_event_id = assignment.get(
             "calendar_event_id"
@@ -2264,10 +1771,7 @@ async def volunteer_response(
             print(
                 "=== CALENDAR EVENT ALREADY EXISTS ==="
             )
-
-            print(
-                existing_event_id
-            )
+            print(existing_event_id)
 
         else:
 
@@ -2282,41 +1786,21 @@ async def volunteer_response(
                 )
             )
 
-            calendar_event_id = (
+            update_data["calendar_event_id"] = (
                 calendar_event.get("id")
             )
-
-            calendar_event_url = (
+            update_data["calendar_event_url"] = (
                 calendar_event.get("htmlLink")
             )
 
-            update_data[
-                "calendar_event_id"
-            ] = calendar_event_id
+            print("=== CALENDAR EVENT CREATED ===")
+            print(update_data["calendar_event_id"])
+            print(update_data["calendar_event_url"])
 
-            update_data[
-                "calendar_event_url"
-            ] = calendar_event_url
+        notify_donor_volunteer_en_route(assignment, volunteer)
 
-            print(
-                "=== CALENDAR EVENT CREATED ==="
-            )
-
-            print(
-                calendar_event_id
-            )
-
-            print(
-                calendar_event_url
-            )
-
-    print(
-        "=== UPDATING DISPATCH ASSIGNMENT ==="
-    )
-
-    print(
-        update_data
-    )
+    print("=== UPDATING DISPATCH ASSIGNMENT ===")
+    print(update_data)
 
     updated_assignment = (
         supabase
@@ -2326,13 +1810,16 @@ async def volunteer_response(
         .execute()
     )
 
-    print(
-        "=== DISPATCH ASSIGNMENT UPDATED ==="
-    )
+    print("=== DISPATCH ASSIGNMENT UPDATED ===")
+    print(updated_assignment.data)
 
-    print(
-        updated_assignment.data
-    )
+    reassignment = None
+
+    if outcome in ("declined", "no_answer"):
+        reassignment = reassign_after_decline(assignment)
+
+        print("=== REASSIGNMENT ===")
+        print(reassignment)
 
     return {
         "status": "received",
@@ -2344,5 +1831,6 @@ async def volunteer_response(
         "calendar_event_url": update_data.get(
             "calendar_event_url"
         ),
+        "reassignment": reassignment,
         "transcript": transcript,
     }

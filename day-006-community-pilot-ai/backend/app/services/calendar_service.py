@@ -6,6 +6,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+from app.services.time_window import PACIFIC, pickup_deadline_at
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar"
@@ -129,23 +131,26 @@ def create_volunteer_calendar_event(
         "",
     )
 
-    # ---------------------------------------------------------------
-    # Demo event timing
-    # ---------------------------------------------------------------
-    #
-    # For now we use a one-hour delivery window.
-    # We'll make this smarter later.
-    #
-
-    now = datetime.now()
-
-    start_time = now + timedelta(
-        minutes=15
+    # Use the donation pickup window when we have it; otherwise
+    # fall back to a short window starting soon.
+    now = datetime.now(PACIFIC)
+    deadline = pickup_deadline_at(
+        {
+            "pickup_deadline": pickup_deadline,
+            "created_at": assignment.get("created_at")
+            or assignment.get("updated_at"),
+        }
     )
 
-    end_time = start_time + timedelta(
-        hours=1
-    )
+    if deadline and deadline > now + timedelta(minutes=10):
+        end_time = deadline
+        start_time = max(
+            now + timedelta(minutes=10),
+            deadline - timedelta(hours=1),
+        )
+    else:
+        start_time = now + timedelta(minutes=15)
+        end_time = start_time + timedelta(hours=1)
 
     event = {
         "summary": (

@@ -20,7 +20,8 @@ import {
   X,
 } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://community-pilot-ai.onrender.com";
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const VAPI_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPI_PUBLIC_KEY ?? "";
 const VAPI_ASSISTANT_ID = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID ?? "";
@@ -77,10 +78,21 @@ type Assignment = {
 
   pickup_address?: string | null;
   pickup_city?: string | null;
+  pickup_deadline?: string | null;
+  minutes_remaining?: number | null;
+  expires_at?: string | null;
+  expired?: boolean;
+
+  route?: {
+    volunteer?: { zip?: string; lat: number; lng: number } | null;
+    pickup?: { zip?: string; lat: number; lng: number } | null;
+    delivery?: { zip?: string; lat: number; lng: number } | null;
+  };
 
   delivery_organization?: string | null;
   delivery_address?: string | null;
   delivery_city?: string | null;
+  delivery_instructions?: string | null;
 
   vapi_call_id?: string | null;
   calendar_event_id?: string | null;
@@ -152,6 +164,14 @@ type Intelligence = {
     last_updated?: string;
     alert_count?: number;
   };
+  expiring_donations?: Array<{
+    id?: string;
+    name?: string | null;
+    meals?: number;
+    city?: string | null;
+    pickup_deadline?: string | null;
+    minutes_remaining?: number | null;
+  }>;
   coordination_signal?: {
     priority?: string;
     message?: string;
@@ -182,11 +202,31 @@ type Volunteer = {
   city?: string | null;
   created_at?: string | null;
   timestamp?: string | null;
+
+  // Raw Supabase "Volunteer Signup" field names. Some backend deploys
+  // return these unmapped — fall back to them so the UI still shows a
+  // real name/phone instead of a placeholder.
+  full_name?: string | null;
+  phone_number?: string | null;
+  whalesync_postgres_id?: string | null;
+
+  // Additional raw signup-form fields, shown in the volunteer detail
+  // drill-through when present.
+  what_transportation_do_you_have?: string | null;
+  how_many_meals_or_food_packages_can_you_transport?: string | number | null;
+  when_are_you_available_from?: string | null;
+  when_are_you_available_until?: string | null;
+  what_is_the_maximum_distance_you_re_comfortable_traveling?: string | null;
+  what_would_you_like_to_help_with?: string | null;
+  starting_location_zip_code?: string | null;
+  are_there_any_transportation_or_scheduling_limitations_we_shoul?: string | null;
 };
 
 type Dashboard = {
   stats: {
     meals_rescued: number;
+    meals_at_donor?: number;
+    meals_in_transit?: number;
     meals_delivered: number;
     active_dispatches: number;
     volunteers: number;
@@ -210,16 +250,31 @@ type Dashboard = {
 function statusLabel(status?: string | null) {
   switch (status) {
     case "completed":
-      return "Completed";
+    case "delivered":
+      return "Delivered";
 
     case "accepted":
+    case "confirmed":
       return "Accepted";
 
     case "declined":
       return "Declined";
 
+    case "needs_reassignment":
+      return "Needs new volunteer";
+
+    case "match_pending":
+      return "Volunteer match pending";
+
+    case "picked_up":
+    case "in_transit":
+      return "Picked up";
+
+    case "no_answer":
+      return "No answer";
+
     case "outreach_pending":
-      return "Outreach Pending";
+      return "Ready to call";
 
     default:
       return status
@@ -229,9 +284,146 @@ function statusLabel(status?: string | null) {
 }
 
 function statusColor(status?: string | null) {
-  if (status === "completed") return C.green;
-  if (status === "accepted") return C.green;
-  if (status === "declined") return C.red;
+  if (status === "completed" || status === "delivered") return C.green;
+  if (status === "picked_up" || status === "in_transit") return C.orange;
+  if (status === "accepted" || status === "confirmed") return C.green;
+  if (status === "declined" || status === "needs_reassignment") return C.red;
+  return C.orange;
+}
+
+function canPlaceCall(assignment?: Assignment | null) {
+  if (!assignment?.id) return false;
+  if (String(assignment.id).startsWith("donation-")) return false;
+  if (assignment.vapi_call_id) return false;
+  if (assignment.volunteer_outcome) return false;
+
+  if (
+    assignment.status === "delivered" ||
+    assignment.status === "completed" ||
+    assignment.status === "declined" ||
+    assignment.status === "needs_reassignment" ||
+    assignment.status === "needs_dispatch" ||
+    assignment.status === "match_pending"
+  ) {
+    return false;
+  }
+
+  return (
+    Boolean(assignment.volunteer?.name) ||
+    Boolean(assignment.volunteer?.phone)
+  );
+}
+
+function canConfirmDelivery(assignment?: Assignment | null) {
+  if (!assignment?.id) return false;
+  if (String(assignment.id).startsWith("donation-")) return false;
+
+  if (
+    assignment.status === "delivered" ||
+    assignment.status === "completed" ||
+    assignment.workflow?.delivery_completed
+  ) {
+    return false;
+  }
+
+  if (
+    assignment.status === "declined" ||
+    assignment.status === "needs_reassignment" ||
+    assignment.volunteer_outcome === "declined"
+  ) {
+    return false;
+  }
+
+  return (
+    assignment.volunteer_outcome === "accepted" ||
+    assignment.status === "accepted" ||
+    assignment.status === "confirmed" ||
+    assignment.status === "picked_up" ||
+    assignment.status === "in_transit" ||
+    Boolean(assignment.calendar_event_id)
+  );
+}
+
+function canConfirmPickup(assignment?: Assignment | null) {
+  if (!canConfirmDelivery(assignment)) return false;
+
+  if (
+    assignment?.status === "picked_up" ||
+    assignment?.status === "in_transit" ||
+    assignment?.workflow?.pickup_confirmed
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function canRecordDecline(assignment?: Assignment | null) {
+  if (!assignment?.id) return false;
+  if (String(assignment.id).startsWith("donation-")) return false;
+  if (assignment.volunteer_outcome === "declined") return false;
+  if (assignment.volunteer_outcome === "accepted") return false;
+
+  if (
+    assignment.status === "delivered" ||
+    assignment.status === "completed" ||
+    assignment.status === "declined" ||
+    assignment.status === "needs_reassignment" ||
+    assignment.status === "needs_dispatch" ||
+    assignment.status === "match_pending" ||
+    assignment.status === "accepted" ||
+    assignment.status === "confirmed"
+  ) {
+    return false;
+  }
+
+  return (
+    Boolean(assignment.volunteer?.name) ||
+    Boolean(assignment.volunteer?.phone) ||
+    Boolean(assignment.workflow?.match_found)
+  );
+}
+
+// The dispatch queue previously derived its badge only from
+// volunteer_outcome / vapi_call_id, ignoring assignment.status. That
+// meant an assignment already marked "completed" (or any other status)
+// with no volunteer_outcome recorded showed up as "Needs dispatch" even
+// though the ledger — which reads status directly — correctly showed it
+// as Completed. These helpers make the queue badge agree with the same
+// status field the ledger uses, falling back to outreach/dispatch state
+// only when status itself is unset or still "needs_dispatch".
+function queueStatusLabel(assignment: Assignment): string {
+  if (
+    assignment.status &&
+    assignment.status !== "needs_dispatch" &&
+    assignment.status !== "pending"
+  ) {
+    return statusLabel(assignment.status);
+  }
+
+  if (assignment.volunteer_outcome) {
+    return statusLabel(assignment.volunteer_outcome);
+  }
+
+  if (assignment.vapi_call_id) {
+    return "AI outreach";
+  }
+
+  return "Needs dispatch";
+}
+
+function queueStatusColor(assignment: Assignment): string {
+  if (
+    assignment.status &&
+    assignment.status !== "needs_dispatch" &&
+    assignment.status !== "pending"
+  ) {
+    return statusColor(assignment.status);
+  }
+
+  if (assignment.volunteer_outcome === "declined") return C.red;
+  if (assignment.volunteer_outcome === "accepted") return C.green;
+  if (assignment.vapi_call_id) return C.orange;
   return C.orange;
 }
 
@@ -250,6 +442,118 @@ function formatTime(value?: string | null) {
   } catch {
     return "";
   }
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return undefined;
+
+  try {
+    return new Date(value).toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function formatExpiry(minutes?: number | null, expired?: boolean) {
+  if (expired || (minutes != null && minutes < 0)) return "Expired";
+  if (minutes == null) return null;
+  if (minutes < 60) return `Expires in ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  return `Expires in ${hours} hr`;
+}
+
+function RescueRouteMap({
+  route,
+  volunteerName,
+  donorName,
+  recipientName,
+}: {
+  route?: Assignment["route"];
+  volunteerName?: string | null;
+  donorName?: string | null;
+  recipientName?: string | null;
+}) {
+  const points = [
+    route?.volunteer
+      ? { ...route.volunteer, label: volunteerName || "Volunteer", tone: C.green }
+      : null,
+    route?.pickup
+      ? { ...route.pickup, label: donorName || "Donor", tone: C.orange }
+      : null,
+    route?.delivery
+      ? { ...route.delivery, label: recipientName || "Recipient", tone: C.text }
+      : null,
+  ].filter(Boolean) as Array<{
+    lat: number;
+    lng: number;
+    zip?: string;
+    label: string;
+    tone: string;
+  }>;
+
+  if (points.length < 2) return null;
+
+  const lats = points.map((point) => point.lat);
+  const lngs = points.map((point) => point.lng);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const latSpan = Math.max(maxLat - minLat, 0.02);
+  const lngSpan = Math.max(maxLng - minLng, 0.02);
+  const pad = 18;
+  const width = 280;
+  const height = 150;
+
+  const xy = (lat: number, lng: number) => ({
+    x: pad + ((lng - minLng) / lngSpan) * (width - pad * 2),
+    y: pad + ((maxLat - lat) / latSpan) * (height - pad * 2),
+  });
+
+  const plotted = points.map((point) => ({ ...point, ...xy(point.lat, point.lng) }));
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl" style={{ border: `1px solid ${C.line}`, background: "rgba(0,0,0,0.18)" }}>
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-[150px] w-full">
+        {plotted.slice(0, -1).map((point, index) => {
+          const next = plotted[index + 1];
+          return (
+            <line
+              key={`leg-${index}`}
+              x1={point.x}
+              y1={point.y}
+              x2={next.x}
+              y2={next.y}
+              stroke="rgba(255,107,53,0.55)"
+              strokeWidth="2"
+              strokeDasharray="4 3"
+            />
+          );
+        })}
+        {plotted.map((point) => (
+          <g key={`${point.label}-${point.lat}`}>
+            <circle cx={point.x} cy={point.y} r="5" fill={point.tone} />
+            <text
+              x={point.x}
+              y={point.y - 10}
+              textAnchor="middle"
+              fill={C.text}
+              fontSize="8"
+              fontFamily="IBM Plex Mono, monospace"
+            >
+              {point.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
 }
 
 function WorkflowStep({
@@ -408,6 +712,287 @@ function AgenticConnector({ active }: { active: boolean }) {
   );
 }
 
+function DetailModal({
+  title,
+  subtitle,
+  badge,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  badge?: React.ReactNode;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 py-10 sm:items-center"
+      style={{ background: "rgba(10,14,11,0.72)" }}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-2xl p-6 sm:p-7"
+        style={{ background: C.paper, color: C.ink }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div
+              className="truncate text-lg font-semibold"
+              style={{ fontFamily: "Space Grotesk, sans-serif" }}
+            >
+              {title}
+            </div>
+
+            {subtitle && (
+              <div
+                className="mt-1 text-xs"
+                style={{ color: "rgba(28,27,20,0.55)" }}
+              >
+                {subtitle}
+              </div>
+            )}
+          </div>
+
+          <div className="flex shrink-0 items-center gap-2">
+            {badge}
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-7 w-7 items-center justify-center rounded-full"
+              style={{ background: "rgba(28,27,20,0.08)" }}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-5 max-h-[65vh] overflow-y-auto pr-1">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetailSection({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-5 last:mb-0">
+      <div
+        className="mb-2 text-[8px] font-bold uppercase tracking-[0.16em]"
+        style={{
+          color: "rgba(28,27,20,0.42)",
+          fontFamily: "IBM Plex Mono, monospace",
+        }}
+      >
+        {label}
+      </div>
+
+      <div
+        className="rounded-xl p-4"
+        style={{ background: "rgba(28,27,20,0.04)" }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value?: React.ReactNode;
+}) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  return (
+    <div
+      className="flex items-start justify-between gap-4 border-b py-2 text-xs last:border-b-0"
+      style={{ borderColor: "rgba(28,27,20,0.08)" }}
+    >
+      <div
+        className="shrink-0 uppercase tracking-[0.1em]"
+        style={{
+          color: "rgba(28,27,20,0.45)",
+          fontSize: 9,
+          fontFamily: "IBM Plex Mono, monospace",
+        }}
+      >
+        {label}
+      </div>
+
+      <div
+        className="text-right text-xs font-medium"
+        style={{ color: C.ink }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+type RescueStep = {
+  label: string;
+  detail: string;
+  complete: boolean;
+  declined?: boolean;
+  icon: React.ElementType;
+};
+
+// Shared by the ledger's inline drill-through and the queue detail modal
+// so both surfaces describe the same rescue in the same terms.
+function buildRescueSteps(assignment: Assignment): RescueStep[] {
+  const wf = assignment.workflow;
+
+  const declined =
+    assignment.status === "declined" ||
+    assignment.volunteer_outcome === "declined";
+
+  return [
+    {
+      label: "Donation received",
+      detail: "Food donation entered into Community Pilot",
+      complete: wf?.donation_logged ?? false,
+      icon: Database,
+    },
+    {
+      label: "AI match found",
+      detail:
+        assignment.recipient?.name ??
+        assignment.delivery_organization ??
+        "Community destination matched",
+      complete: wf?.match_found ?? false,
+      icon: Sparkles,
+    },
+    {
+      label: "Volunteer outreach",
+      detail: assignment.volunteer?.name
+        ? `AI contacted ${assignment.volunteer.name}`
+        : "AI volunteer outreach initiated",
+      complete: wf?.ai_call_placed ?? false,
+      icon: PhoneCall,
+    },
+    {
+      label: declined ? "Volunteer declined" : "Volunteer accepted",
+      detail:
+        assignment.volunteer_outcome === "accepted"
+          ? `${assignment.volunteer?.name ?? "Volunteer"} accepted the assignment`
+          : assignment.volunteer_outcome === "declined"
+            ? `${assignment.volunteer?.name ?? "Volunteer"} declined the assignment`
+            : "Waiting for volunteer response",
+      complete: assignment.volunteer_outcome === "accepted" && !declined,
+      declined,
+      icon: UserCheck,
+    },
+    {
+      label: "Picked up",
+      detail:
+        assignment.status === "picked_up" ||
+        assignment.status === "in_transit" ||
+        wf?.pickup_confirmed
+          ? "Food left the donor"
+          : "Waiting for pickup",
+      complete: Boolean(
+        wf?.pickup_confirmed ||
+          assignment.status === "picked_up" ||
+          assignment.status === "in_transit"
+      ) && !declined,
+      icon: Truck,
+    },
+    {
+      label: "Calendar scheduled",
+      detail: assignment.calendar_event_id
+        ? "Pickup event created in Google Calendar"
+        : "Calendar event pending",
+      complete: Boolean(assignment.calendar_event_id),
+      icon: CalendarCheck2,
+    },
+    {
+      label: "Delivery completed",
+      detail: wf?.delivery_completed
+        ? "Food delivered to the community destination"
+        : "Awaiting pickup and delivery",
+      complete: wf?.delivery_completed ?? false,
+      icon: Truck,
+    },
+  ];
+}
+
+function RescueStepList({ steps }: { steps: RescueStep[] }) {
+  return (
+    <div className="space-y-3">
+      {steps.map((step, index) => {
+        const isActive =
+          !step.complete &&
+          !step.declined &&
+          (index === 0 || steps[index - 1]?.complete);
+
+        const color = step.declined
+          ? C.red
+          : step.complete
+            ? C.green
+            : isActive
+              ? C.orange
+              : "rgba(28,27,20,0.3)";
+
+        return (
+          <div key={step.label} className="flex items-start gap-3">
+            <div
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+              style={{
+                background: step.declined
+                  ? "rgba(217,108,95,0.14)"
+                  : step.complete
+                    ? "rgba(92,156,116,0.14)"
+                    : isActive
+                      ? "rgba(255,107,53,0.14)"
+                      : "rgba(28,27,20,0.05)",
+                border: `1px solid ${color}`,
+              }}
+            >
+              {step.declined ? (
+                <X className="h-3.5 w-3.5" style={{ color }} />
+              ) : step.complete ? (
+                <Check className="h-3.5 w-3.5" style={{ color }} />
+              ) : (
+                <step.icon className="h-3.5 w-3.5" style={{ color }} />
+              )}
+            </div>
+
+            <div className="min-w-0 flex-1 pt-0.5">
+              <div
+                className="text-xs font-semibold"
+                style={{ color: step.complete || step.declined ? color : C.ink }}
+              >
+                {step.label}
+              </div>
+
+              <div
+                className="mt-0.5 text-[10px] leading-4"
+                style={{ color: "rgba(28,27,20,0.55)" }}
+              >
+                {step.detail}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function CommunityPilot() {
   const [dashboard, setDashboard] =
     useState<Dashboard | null>(null);
@@ -449,6 +1034,27 @@ export default function CommunityPilot() {
     useState<"idle" | "running" | "done" | "error">("idle");
 
   const [dispatchMessage, setDispatchMessage] =
+    useState<string | null>(null);
+
+  const [completeState, setCompleteState] =
+    useState<"idle" | "running" | "done" | "error">("idle");
+
+  const [pickupState, setPickupState] =
+    useState<"idle" | "running" | "done" | "error">("idle");
+
+  const [callingId, setCallingId] =
+    useState<string | null>(null);
+
+  const [decliningId, setDecliningId] =
+    useState<string | null>(null);
+
+  const [lastMatches, setLastMatches] =
+    useState<Assignment[]>([]);
+
+  const [selectedQueueId, setSelectedQueueId] =
+    useState<string | null>(null);
+
+  const [selectedVolunteerKey, setSelectedVolunteerKey] =
     useState<string | null>(null);
 
   const vapiRef = useRef<any>(null);
@@ -550,10 +1156,50 @@ export default function CommunityPilot() {
       setDispatchState("done");
 
       if (data.status === "outreach_ready") {
+        const matched: Assignment[] = [];
+
+        for (const plan of data.plans ?? []) {
+          const donation = plan?.plan?.donation ?? {};
+          const request = plan?.plan?.request ?? {};
+
+          for (const item of plan?.assignments ?? []) {
+            if (!item?.assignment_id) continue;
+
+            matched.push({
+              id: item.assignment_id,
+              meals_assigned: item.meals_assigned,
+              status: item.status ?? "outreach_pending",
+              vapi_call_id: item.vapi_call_id ?? null,
+              donor: {
+                name: donation.restaurant_name ?? null,
+              },
+              recipient: {
+                name: request.organization_name ?? null,
+              },
+              volunteer: {
+                name: item.volunteer_name ?? null,
+                phone: item.phone ?? null,
+                email: item.email ?? null,
+              },
+              delivery_organization: request.organization_name ?? null,
+              workflow: {
+                form_submitted: true,
+                donation_logged: true,
+                match_found: true,
+                ai_call_placed: Boolean(item.vapi_call_id),
+                pickup_confirmed: false,
+                delivery_scheduled: false,
+                delivery_completed: false,
+              },
+            });
+          }
+        }
+
+        setLastMatches(matched);
         setDispatchMessage(
-          `Matched ${data.summary?.plans_created ?? 0} donation(s) and contacted ${
-            data.summary?.volunteers_to_contact ?? 0
-          } volunteer(s).`
+          matched.length > 0
+            ? `Matched ${matched.length} volunteer(s). Place a call below.`
+            : (data.message ?? "No new matches were found.")
         );
       } else {
         setDispatchMessage(
@@ -566,6 +1212,170 @@ export default function CommunityPilot() {
       console.error("Dispatch outreach failed:", err);
       setDispatchState("error");
       setDispatchMessage("Unable to run AI matching right now.");
+    }
+  }
+
+  async function placeVolunteerCall(assignmentId: string) {
+    try {
+      setCallingId(assignmentId);
+
+      const response = await fetch(
+        `${API_URL}/api/dispatch/outreach/${assignmentId}/call`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+
+      if (data.status === "call_initiated") {
+        setDispatchState("done");
+        setDispatchMessage(
+          `Calling ${data.volunteer?.name ?? "the volunteer"} now.`
+        );
+        setLastMatches((previous) =>
+          previous.map((item) =>
+            item.id === assignmentId
+              ? {
+                  ...item,
+                  vapi_call_id: data.vapi_call_id ?? "placed",
+                  workflow: {
+                    form_submitted: true,
+                    donation_logged: true,
+                    match_found: true,
+                    ai_call_placed: true,
+                    pickup_confirmed: false,
+                    delivery_scheduled: false,
+                    delivery_completed: false,
+                  },
+                }
+              : item
+          )
+        );
+        loadDashboard();
+        return;
+      }
+
+      const errorMessage =
+        data.status === "volunteer_not_found"
+          ? "That volunteer is no longer available. Run AI matching again."
+          : data.status === "missing_phone"
+            ? "That volunteer does not have a phone number."
+            : data.status === "assignment_not_found"
+              ? "That dispatch assignment could not be found."
+              : data.status === "call_failed"
+                ? (data.message || data.error || "The volunteer call could not be placed.")
+                : (data.message || "Unable to place the volunteer call.");
+
+      setDispatchState("error");
+      setDispatchMessage(errorMessage);
+    } catch (err) {
+      console.error("Place volunteer call failed:", err);
+      setDispatchState("error");
+      setDispatchMessage("Unable to place the volunteer call.");
+    } finally {
+      setCallingId(null);
+    }
+  }
+
+  async function confirmDelivery(assignmentId: string) {
+    try {
+      setCompleteState("running");
+
+      const response = await fetch(
+        `${API_URL}/api/dispatch/${assignmentId}/complete`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+
+      if (
+        !response.ok ||
+        (data.status !== "delivered" && data.status !== "already_delivered")
+      ) {
+        throw new Error(
+          data?.message ?? `Backend returned ${response.status}`
+        );
+      }
+
+      setCompleteState("done");
+      loadDashboard();
+    } catch (err) {
+      console.error("Confirm delivery failed:", err);
+      setCompleteState("error");
+    }
+  }
+
+  async function confirmPickup(assignmentId: string) {
+    try {
+      setPickupState("running");
+
+      const response = await fetch(
+        `${API_URL}/api/dispatch/${assignmentId}/pickup`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+
+      if (
+        !response.ok ||
+        (data.status !== "picked_up" && data.status !== "already_delivered")
+      ) {
+        throw new Error(
+          data?.message ?? `Backend returned ${response.status}`
+        );
+      }
+
+      setPickupState("done");
+      loadDashboard();
+    } catch (err) {
+      console.error("Confirm pickup failed:", err);
+      setPickupState("error");
+    }
+  }
+
+  async function recordDecline(assignmentId: string) {
+    try {
+      setDecliningId(assignmentId);
+      setDispatchState("running");
+
+      const response = await fetch(
+        `${API_URL}/api/dispatch/${assignmentId}/decline`,
+        { method: "POST" }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok || data.status === "assignment_not_found") {
+        throw new Error(
+          data?.message ?? `Backend returned ${response.status}`
+        );
+      }
+
+      const reassignment = data.reassignment ?? {};
+      const replacementName = reassignment.volunteer_name as
+        | string
+        | undefined;
+
+      setLastMatches((previous) =>
+        previous.filter((item) => item.id !== assignmentId)
+      );
+
+      if (reassignment.status === "reassigned" && replacementName) {
+        setDispatchState("done");
+        setDispatchMessage(
+          `${replacementName} was matched as a replacement. Place a call when you are ready.`
+        );
+      } else {
+        setDispatchState("done");
+        setDispatchMessage("Volunteer match pending");
+      }
+
+      loadDashboard();
+    } catch (err) {
+      console.error("Record volunteer decline failed:", err);
+      setDispatchState("error");
+      setDispatchMessage("Unable to record the volunteer decline.");
+    } finally {
+      setDecliningId(null);
     }
   }
 
@@ -726,8 +1536,11 @@ export default function CommunityPilot() {
   const activeAssignment =
     useMemo(() => {
       return (
+        assignments.find((a) => canPlaceCall(a)) ??
         assignments.find(
-          (a) => a.status === "accepted"
+          (a) =>
+            a.status === "accepted" ||
+            a.status === "confirmed"
         ) ??
         assignments.find(
           (a) =>
@@ -770,6 +1583,28 @@ export default function CommunityPilot() {
     });
   }, [dashboard?.rescue_queue, assignments]);
 
+  // "Rescues in queue" should only show work that's still in flight —
+  // once an item reaches completed/delivered it belongs in the ledger
+  // below, not the active queue. Without this filter the two panels
+  // showed the exact same list.
+  const activeRescueQueue = useMemo(() => {
+    return rescueQueue.filter(
+      (item) =>
+        item.status !== "completed" &&
+        item.status !== "delivered" &&
+        item.status !== "declined" &&
+        item.status !== "needs_reassignment" &&
+        item.volunteer_outcome !== "declined"
+    );
+  }, [rescueQueue]);
+
+  const readyCalls = useMemo(() => {
+    const fromLast = lastMatches.filter((item) => canPlaceCall(item));
+    if (fromLast.length > 0) return fromLast;
+
+    return activeRescueQueue.filter((item) => canPlaceCall(item)).slice(0, 5);
+  }, [lastMatches, activeRescueQueue]);
+
   const volunteerNetwork = useMemo<Volunteer[]>(() => {
     const backendVolunteers =
       dashboard?.volunteers_list ??
@@ -778,7 +1613,14 @@ export default function CommunityPilot() {
 
     const byKey = new Map<string, Volunteer>();
 
-    for (const volunteer of backendVolunteers) {
+    for (const raw of backendVolunteers) {
+      const volunteer: Volunteer = {
+        ...raw,
+        id: raw.id ?? raw.whalesync_postgres_id ?? undefined,
+        name: raw.name ?? raw.full_name ?? undefined,
+        phone: raw.phone ?? raw.phone_number ?? undefined,
+      };
+
       const key =
         volunteer.id ??
         volunteer.email ??
@@ -855,8 +1697,10 @@ export default function CommunityPilot() {
   const foodAwaitingMatch = useMemo(() => {
     return rescueQueue.filter(
       (item) =>
-        !item.volunteer_outcome &&
-        !(item.workflow?.match_found ?? false)
+        item.status === "match_pending" ||
+        item.status === "needs_dispatch" ||
+        (!item.volunteer_outcome &&
+          !(item.workflow?.match_found ?? false))
     );
   }, [rescueQueue]);
 
@@ -878,6 +1722,29 @@ export default function CommunityPilot() {
         !assignment.volunteer_outcome
     );
   }, [assignments]);
+
+  const selectedQueueItem = useMemo(() => {
+    if (!selectedQueueId) return null;
+    return (
+      rescueQueue.find((item) => item.id === selectedQueueId) ?? null
+    );
+  }, [rescueQueue, selectedQueueId]);
+
+  const selectedVolunteer = useMemo(() => {
+    if (!selectedVolunteerKey) return null;
+
+    return (
+      volunteerNetwork.find((volunteer, index) => {
+        const key =
+          volunteer.id ??
+          volunteer.email ??
+          volunteer.phone ??
+          `${volunteer.name}-${index}`;
+
+        return key === selectedVolunteerKey;
+      }) ?? null
+    );
+  }, [volunteerNetwork, selectedVolunteerKey]);
 
   // Poll the selected volunteer call only after activeAssignment has been
   // derived. This keeps the effect dependency safe and avoids referencing
@@ -1006,6 +1873,7 @@ export default function CommunityPilot() {
 
       if (
         assignment.status === "completed" ||
+        assignment.status === "delivered" ||
         wf?.delivery_completed
       ) {
         events.push({
@@ -1227,19 +2095,19 @@ export default function CommunityPilot() {
         <div className="mt-10 grid grid-cols-2 gap-3 md:grid-cols-4">
           {[
             [
-              dashboard?.stats.meals_rescued ??
+              dashboard?.stats.meals_at_donor ??
                 0,
-              "Meals rescued",
+              "Still at donor",
+            ],
+            [
+              dashboard?.stats.meals_in_transit ??
+                0,
+              "In transit",
             ],
             [
               dashboard?.stats.meals_delivered ??
                 0,
               "Meals delivered",
-            ],
-            [
-              dashboard?.stats.active_dispatches ??
-                0,
-              "Active dispatches",
             ],
             [
               dashboard?.stats.volunteers ??
@@ -1708,6 +2576,16 @@ export default function CommunityPilot() {
                     </div>
                   </div>
                 </div>
+
+                <RescueRouteMap
+                  route={activeAssignment.route}
+                  volunteerName={activeAssignment.volunteer?.name}
+                  donorName={activeAssignment.donor?.name}
+                  recipientName={
+                    activeAssignment.recipient?.name ??
+                    activeAssignment.delivery_organization
+                  }
+                />
               </div>
 
               {/* WORKFLOW */}
@@ -1861,24 +2739,118 @@ export default function CommunityPilot() {
                     </div>
                   </div>
 
-                  {activeAssignment.calendar_event_url && (
-                    <a
-                      href={
-                        activeAssignment.calendar_event_url
-                      }
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.12em]"
-                      style={{
-                        color: C.green,
-                        fontFamily:
-                          "IBM Plex Mono, monospace",
-                      }}
-                    >
-                      <CalendarCheck2 className="h-3.5 w-3.5" />
-                      Calendar confirmed
-                    </a>
-                  )}
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    {activeAssignment.calendar_event_url && (
+                      <a
+                        href={
+                          activeAssignment.calendar_event_url
+                        }
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center gap-1.5 text-[9px] font-semibold uppercase tracking-[0.12em]"
+                        style={{
+                          color: C.green,
+                          fontFamily:
+                            "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        <CalendarCheck2 className="h-3.5 w-3.5" />
+                        Calendar confirmed
+                      </a>
+                    )}
+
+                    {canPlaceCall(activeAssignment) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          placeVolunteerCall(activeAssignment.id)
+                        }
+                        disabled={callingId === activeAssignment.id}
+                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.12em] disabled:opacity-60"
+                        style={{
+                          background: C.orange,
+                          color: C.ink,
+                          fontFamily:
+                            "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        <PhoneOutgoing className="h-3.5 w-3.5" />
+                        {callingId === activeAssignment.id
+                          ? "Calling..."
+                          : "Place call"}
+                      </button>
+                    )}
+
+                    {canRecordDecline(activeAssignment) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          recordDecline(activeAssignment.id)
+                        }
+                        disabled={decliningId === activeAssignment.id}
+                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.12em] disabled:opacity-60"
+                        style={{
+                          background: "transparent",
+                          color: C.red,
+                          border: `1px solid ${C.red}`,
+                          fontFamily:
+                            "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        {decliningId === activeAssignment.id
+                          ? "Updating..."
+                          : "Mark declined"}
+                      </button>
+                    )}
+
+                    {canConfirmPickup(activeAssignment) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          confirmPickup(activeAssignment.id)
+                        }
+                        disabled={pickupState === "running"}
+                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.12em] disabled:opacity-60"
+                        style={{
+                          background: "transparent",
+                          color: C.ink,
+                          border: `1px solid ${C.ink}`,
+                          fontFamily:
+                            "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        <Truck className="h-3.5 w-3.5" />
+                        {pickupState === "running"
+                          ? "Updating..."
+                          : "Picked up"}
+                      </button>
+                    )}
+
+                    {canConfirmDelivery(activeAssignment) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          confirmDelivery(activeAssignment.id)
+                        }
+                        disabled={completeState === "running"}
+                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[9px] font-semibold uppercase tracking-[0.12em] disabled:opacity-60"
+                        style={{
+                          background: C.ink,
+                          color: C.paper,
+                          fontFamily:
+                            "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        {completeState === "running"
+                          ? "Confirming..."
+                          : completeState === "error"
+                            ? "Retry confirm"
+                            : "Confirm delivery"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1917,6 +2889,13 @@ export default function CommunityPilot() {
                 >
                   Rescues in queue
                 </h2>
+                <p
+                  className="mt-1 text-xs"
+                  style={{ color: C.faint }}
+                >
+                  Active only — completed and delivered rescues move to the
+                  ledger below.
+                </p>
               </div>
 
               <span
@@ -1927,13 +2906,13 @@ export default function CommunityPilot() {
                   fontFamily: "IBM Plex Mono, monospace",
                 }}
               >
-                {rescueQueue.length} active
+                {activeRescueQueue.length} active
               </span>
             </div>
 
             <div className="max-h-[470px] overflow-y-auto p-5 lg:p-6">
               <div className="grid gap-2">
-              {rescueQueue.length === 0 ? (
+              {activeRescueQueue.length === 0 ? (
                 <div
                   className="rounded-xl p-5 text-center text-[10px]"
                   style={{
@@ -1953,34 +2932,24 @@ export default function CommunityPilot() {
                   </div>
                 </div>
               ) : (
-                rescueQueue.map((assignment) => {
-                  const awaitingVolunteer =
-                    !assignment.volunteer_outcome &&
-                    Boolean(
-                      assignment.vapi_call_id ||
-                      assignment.workflow?.match_found
-                    );
-
-                  const queueColor =
-                    assignment.volunteer_outcome === "declined"
-                      ? C.red
-                      : assignment.volunteer_outcome === "accepted"
-                        ? C.green
-                        : C.orange;
+                activeRescueQueue.map((assignment) => {
+                  const queueColor = queueStatusColor(assignment);
 
                   return (
-                    <button
+                    <div
                       key={`queue-${assignment.id}`}
-                      type="button"
-                      onClick={() => setSelectedId(assignment.id)}
-                      className="card-hover rounded-xl p-4 text-left"
+                      className="card-hover rounded-xl p-4"
                       style={{
                         background: "rgba(241,234,217,0.035)",
                         border: `1px solid ${C.line}`,
                       }}
                     >
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedQueueId(assignment.id)}
+                        className="flex w-full flex-col gap-3 text-left sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <div
                               className="truncate text-sm font-semibold"
@@ -1997,14 +2966,35 @@ export default function CommunityPilot() {
                                 fontFamily: "IBM Plex Mono, monospace",
                               }}
                             >
-                              {assignment.volunteer_outcome
-                                ? statusLabel(
-                                    assignment.volunteer_outcome
-                                  )
-                                : assignment.vapi_call_id
-                                  ? "AI outreach"
-                                  : "Needs dispatch"}
+                              {queueStatusLabel(assignment)}
                             </span>
+                            {formatExpiry(
+                              assignment.minutes_remaining,
+                              assignment.expired
+                            ) && (
+                              <span
+                                className="rounded-full px-2 py-1 text-[7px] font-bold uppercase tracking-[0.12em]"
+                                style={{
+                                  color:
+                                    assignment.expired ||
+                                    (assignment.minutes_remaining ?? 999) < 60
+                                      ? C.red
+                                      : C.orange,
+                                  border: `1px solid ${
+                                    assignment.expired ||
+                                    (assignment.minutes_remaining ?? 999) < 60
+                                      ? C.red
+                                      : C.orange
+                                  }`,
+                                  fontFamily: "IBM Plex Mono, monospace",
+                                }}
+                              >
+                                {formatExpiry(
+                                  assignment.minutes_remaining,
+                                  assignment.expired
+                                )}
+                              </span>
+                            )}
                           </div>
 
                           <div
@@ -2017,38 +3007,24 @@ export default function CommunityPilot() {
                               assignment.recipient?.name ??
                               assignment.delivery_organization ??
                               "Community destination"}
+                            {assignment.volunteer?.name
+                              ? ` · ${assignment.volunteer.name}`
+                              : ""}
                           </div>
                         </div>
 
-                        <div className="shrink-0 text-left sm:text-right">
-                          <div
-                            className="text-[8px] font-bold uppercase tracking-[0.12em]"
-                            style={{
-                              color: awaitingVolunteer
-                                ? C.orange
-                                : C.faint,
-                              fontFamily:
-                                "IBM Plex Mono, monospace",
-                            }}
-                          >
-                            {awaitingVolunteer
-                              ? "Volunteer response pending"
-                              : statusLabel(assignment.status)}
-                          </div>
-
-                          <div
-                            className="mt-1 text-[8px]"
-                            style={{ color: C.faint }}
-                          >
-                            {formatTime(
-                              assignment.rescue_activity_at ??
-                                assignment.updated_at ??
-                                assignment.created_at
-                            )}
-                          </div>
+                        <div
+                          className="shrink-0 text-[8px] sm:text-right"
+                          style={{ color: C.faint }}
+                        >
+                          {formatTime(
+                            assignment.rescue_activity_at ??
+                              assignment.updated_at ??
+                              assignment.created_at
+                          )}
                         </div>
-                      </div>
-                    </button>
+                      </button>
+                    </div>
                   );
                 })
               )}
@@ -2146,15 +3122,20 @@ export default function CommunityPilot() {
                             ? C.orange
                             : C.green;
 
+                      const volunteerKey =
+                        volunteer.id ??
+                        volunteer.email ??
+                        volunteer.phone ??
+                        `${volunteer.name}-${index}`;
+
                       return (
-                        <div
-                          key={
-                            volunteer.id ??
-                            volunteer.email ??
-                            volunteer.phone ??
-                            `${volunteer.name}-${index}`
+                        <button
+                          key={volunteerKey}
+                          type="button"
+                          onClick={() =>
+                            setSelectedVolunteerKey(volunteerKey)
                           }
-                          className="flex items-center gap-3 rounded-xl p-3"
+                          className="card-hover flex w-full items-center gap-3 rounded-xl p-3 text-left"
                           style={{
                             background:
                               "rgba(241,234,217,0.035)",
@@ -2211,7 +3192,7 @@ export default function CommunityPilot() {
                                   ? "AI outreach"
                                   : "Available"}
                           </span>
-                        </div>
+                        </button>
                       );
                     }
                   )}
@@ -2259,9 +3240,9 @@ export default function CommunityPilot() {
                 style={{ color: C.muted }}
               >
                 The matching agent looks for a donation that still needs a
-                pickup and a volunteer who is not already on an assignment,
-                then the routing and coordinator agents build a plan and
-                place an AI outreach call.
+                pickup and a volunteer who is not already on an assignment.
+                After a match is saved, place the AI outreach call from the
+                dispatch queue.
               </p>
             </div>
 
@@ -2335,7 +3316,7 @@ export default function CommunityPilot() {
                     </span>{" "}
                     {foodAwaitingMatch.length} donation(s) and{" "}
                     {volunteersAvailable.length} volunteer(s) are waiting.
-                    Run AI matching to place outreach calls.
+                    Run AI matching, then place a call.
                   </>
                 ) : (
                   <>
@@ -2357,6 +3338,85 @@ export default function CommunityPilot() {
                   </div>
                 )}
               </div>
+
+              {readyCalls.length > 0 && (
+                <div
+                  className="mt-4 space-y-2"
+                >
+                  <div
+                    className="text-[8px] font-bold uppercase tracking-[0.15em]"
+                    style={{
+                      color: C.orange,
+                      fontFamily: "IBM Plex Mono, monospace",
+                    }}
+                  >
+                    Matched · ready to call
+                  </div>
+                  {readyCalls.map((assignment) => (
+                    <div
+                      key={`ready-${assignment.id}`}
+                      className="flex flex-col gap-3 rounded-xl p-3 sm:flex-row sm:items-center sm:justify-between"
+                      style={{
+                        background: "rgba(255,107,53,0.08)",
+                        border: "1px solid rgba(255,107,53,0.22)",
+                      }}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold">
+                          {assignment.volunteer?.name ?? "Matched volunteer"}
+                        </div>
+                        <div
+                          className="mt-1 text-[9px]"
+                          style={{ color: C.muted }}
+                        >
+                          {assignment.meals_assigned ?? 0} meals ·{" "}
+                          {assignment.donor?.name ?? "Food donor"} →{" "}
+                          {assignment.recipient?.name ??
+                            assignment.delivery_organization ??
+                            "Community destination"}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => placeVolunteerCall(assignment.id)}
+                          disabled={callingId === assignment.id}
+                          className="flex items-center justify-center gap-1.5 rounded-full px-4 py-2 text-[8px] font-bold uppercase tracking-[0.12em] disabled:opacity-60"
+                          style={{
+                            background: C.orange,
+                            color: C.ink,
+                            fontFamily: "IBM Plex Mono, monospace",
+                          }}
+                        >
+                          <PhoneOutgoing className="h-3.5 w-3.5" />
+                          {callingId === assignment.id
+                            ? "Calling..."
+                            : "Place call"}
+                        </button>
+                        {canRecordDecline(assignment) && (
+                          <button
+                            type="button"
+                            onClick={() => recordDecline(assignment.id)}
+                            disabled={decliningId === assignment.id}
+                            className="flex items-center justify-center gap-1.5 rounded-full px-4 py-2 text-[8px] font-bold uppercase tracking-[0.12em] disabled:opacity-60"
+                            style={{
+                              background: "transparent",
+                              color: C.red,
+                              border: `1px solid ${C.red}`,
+                              fontFamily: "IBM Plex Mono, monospace",
+                            }}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                            {decliningId === assignment.id
+                              ? "Updating..."
+                              : "Mark declined"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* LIVE QUEUES */}
@@ -2396,6 +3456,9 @@ export default function CommunityPilot() {
                       >
                         {item.donor?.name ?? "Food donation"} ·{" "}
                         {item.meals_assigned ?? 0} meals
+                        {item.status === "match_pending"
+                          ? " · volunteer match pending"
+                          : ""}
                       </div>
                     ))}
 
@@ -2485,6 +3548,14 @@ export default function CommunityPilot() {
             >
               Recent food rescues
             </h2>
+
+            <p
+              className="mt-1 text-xs"
+              style={{ color: C.faint }}
+            >
+              Full history — includes everything that's moved through the
+              dispatch queue above, at any stage.
+            </p>
           </div>
 
           <div
@@ -3598,6 +4669,44 @@ export default function CommunityPilot() {
                     Community Pilot combines operational food data with public
                     community context to help coordinators prioritize action.
                   </div>
+
+                  {(intelligence?.expiring_donations?.length ?? 0) > 0 && (
+                    <div className="mt-5">
+                      <div
+                        className="text-[8px] font-bold uppercase tracking-[0.15em]"
+                        style={{
+                          color: C.orange,
+                          fontFamily: "IBM Plex Mono, monospace",
+                        }}
+                      >
+                        Match these first
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {intelligence?.expiring_donations?.map((item) => (
+                          <div
+                            key={item.id ?? item.name ?? String(item.minutes_remaining)}
+                            className="flex items-center justify-between gap-3 text-[10px]"
+                            style={{ color: C.muted }}
+                          >
+                            <span className="truncate">
+                              {item.name ?? "Food donation"}
+                              {item.city ? ` · ${item.city}` : ""}
+                              {item.meals ? ` · ${item.meals} meals` : ""}
+                            </span>
+                            <span
+                              className="shrink-0 uppercase tracking-[0.08em]"
+                              style={{
+                                color: C.orange,
+                                fontFamily: "IBM Plex Mono, monospace",
+                              }}
+                            >
+                              {formatExpiry(item.minutes_remaining)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -3626,7 +4735,7 @@ export default function CommunityPilot() {
               <div>
                 <div className="text-[9px] font-bold uppercase tracking-[0.2em]" style={{ color: C.orange, fontFamily: "IBM Plex Mono, monospace" }}>Operational demo</div>
                 <h2 className="mt-2 text-3xl font-semibold" style={{ fontFamily: "Space Grotesk, sans-serif" }}>Watch the agents work.</h2>
-                <p className="mt-2 max-w-2xl text-xs leading-5" style={{ color: C.muted }}>Real browser voice, real Vapi tool events, real dashboard state, real volunteer outreach, and real calendar state.</p>
+                <p className="mt-2 max-w-2xl text-xs leading-5" style={{ color: C.muted }}>Talk to Community Pilot to donate food, request meals, or sign up as a volunteer — then watch matching, outreach, and calendar updates in one place.</p>
               </div>
               <div className="flex items-center gap-2 text-[8px] font-bold uppercase tracking-[0.16em]" style={{ color: C.green, fontFamily: "IBM Plex Mono, monospace" }}><span className="h-2 w-2 rounded-full" style={{ background: C.green }} /> System operational</div>
             </div>
@@ -3635,7 +4744,7 @@ export default function CommunityPilot() {
               <div className="border-b p-6 lg:border-b-0 lg:border-r lg:p-7" style={{ borderColor: C.line }}>
                 <div className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.16em]" style={{ color: C.faint, fontFamily: "IBM Plex Mono, monospace" }}><MessageSquare className="h-3.5 w-3.5" /> Conversation</div>
                 <div className="mt-4 max-h-[430px] min-h-[260px] space-y-3 overflow-y-auto rounded-xl p-4" style={{ background: "rgba(0,0,0,0.18)", border: `1px solid ${C.line}` }}>
-                  {transcript.length === 0 ? <div className="flex h-full min-h-[220px] items-center justify-center text-center text-[10px]" style={{ color: C.faint }}>Start the browser call to watch the conversation appear here.</div> : transcript.map((m, i) => <div key={`${i}-${m.text}`} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}><div className="max-w-[88%] rounded-xl px-4 py-3" style={{ background: m.role === "user" ? "rgba(255,107,53,0.10)" : "rgba(92,156,116,0.10)", border: `1px solid ${m.role === "user" ? "rgba(255,107,53,0.22)" : "rgba(92,156,116,0.22)"}` }}><div className="text-[7px] font-bold uppercase tracking-[0.15em]" style={{ color: m.role === "user" ? C.orange : C.green, fontFamily: "IBM Plex Mono, monospace" }}>{m.role === "user" ? "You" : "Community Pilot"}</div><div className="mt-1 text-xs leading-5" style={{ color: C.text }}>{m.text}</div></div></div>)}
+                  {transcript.length === 0 ? <div className="flex h-full min-h-[220px] items-center justify-center text-center text-[10px]" style={{ color: C.faint }}>Start the browser call and say whether you want to donate, request food, or volunteer.</div> : transcript.map((m, i) => <div key={`${i}-${m.text}`} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}><div className="max-w-[88%] rounded-xl px-4 py-3" style={{ background: m.role === "user" ? "rgba(255,107,53,0.10)" : "rgba(92,156,116,0.10)", border: `1px solid ${m.role === "user" ? "rgba(255,107,53,0.22)" : "rgba(92,156,116,0.22)"}` }}><div className="text-[7px] font-bold uppercase tracking-[0.15em]" style={{ color: m.role === "user" ? C.orange : C.green, fontFamily: "IBM Plex Mono, monospace" }}>{m.role === "user" ? "You" : "Community Pilot"}</div><div className="mt-1 text-xs leading-5" style={{ color: C.text }}>{m.text}</div></div></div>)}
                 </div>
                 <button type="button" onClick={voiceState === "active" || voiceState === "connecting" ? endVoiceCall : startVoiceCall} disabled={voiceState === "ending"} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-[9px] font-bold uppercase tracking-[0.14em]" style={{ background: voiceState === "active" ? C.red : C.paper, color: voiceState === "active" ? C.paper : C.ink, fontFamily: "IBM Plex Mono, monospace" }}><PhoneCall className="h-3.5 w-3.5" />{voiceState === "connecting" ? "Connecting..." : voiceState === "active" ? "End call" : "Talk to Community Pilot"}</button>
                 {voiceError && <div className="mt-2 text-[9px]" style={{ color: C.red }}>{voiceError}</div>}
@@ -3754,6 +4863,350 @@ export default function CommunityPilot() {
           coordination system
         </div>
       </footer>
+
+      {/* RESCUE QUEUE ITEM DETAIL */}
+
+      {selectedQueueItem && (
+        <DetailModal
+          title={selectedQueueItem.donor?.name ?? "Food rescue"}
+          subtitle={`${selectedQueueItem.meals_assigned ?? 0} meals · ${
+            selectedQueueItem.pickup_city ?? "San Jose"
+          } → ${
+            selectedQueueItem.delivery_city ??
+            selectedQueueItem.recipient?.name ??
+            selectedQueueItem.delivery_organization ??
+            "Community destination"
+          }`}
+          badge={
+            <span
+              className="rounded-full px-2.5 py-1 text-[8px] font-bold uppercase tracking-[0.12em]"
+              style={{
+                color: queueStatusColor(selectedQueueItem),
+                border: `1px solid ${queueStatusColor(selectedQueueItem)}`,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              {queueStatusLabel(selectedQueueItem)}
+            </span>
+          }
+          onClose={() => setSelectedQueueId(null)}
+        >
+          <DetailSection label="Pickup">
+            <DetailRow
+              label="Donor"
+              value={selectedQueueItem.donor?.name}
+            />
+            <DetailRow
+              label="Contact"
+              value={selectedQueueItem.donor?.contact}
+            />
+            <DetailRow
+              label="Address"
+              value={selectedQueueItem.pickup_address}
+            />
+            <DetailRow
+              label="City"
+              value={selectedQueueItem.pickup_city}
+            />
+            <DetailRow
+              label="Deadline"
+              value={
+                formatExpiry(
+                  selectedQueueItem.minutes_remaining,
+                  selectedQueueItem.expired
+                ) || selectedQueueItem.pickup_deadline
+              }
+            />
+            <DetailRow
+              label="Meals"
+              value={selectedQueueItem.meals_assigned}
+            />
+          </DetailSection>
+
+          {(selectedQueueItem.recipient?.name ||
+            selectedQueueItem.delivery_organization) && (
+            <DetailSection label="Delivery">
+              <DetailRow
+                label="Organization"
+                value={
+                  selectedQueueItem.recipient?.name ??
+                  selectedQueueItem.delivery_organization
+                }
+              />
+              <DetailRow
+                label="Contact"
+                value={selectedQueueItem.recipient?.contact}
+              />
+              <DetailRow
+                label="Address"
+                value={selectedQueueItem.delivery_address}
+              />
+              <DetailRow
+                label="City"
+                value={selectedQueueItem.delivery_city}
+              />
+              <DetailRow
+                label="Instructions"
+                value={selectedQueueItem.delivery_instructions}
+              />
+            </DetailSection>
+          )}
+
+          {selectedQueueItem.volunteer?.name && (
+            <DetailSection label="Volunteer">
+              <DetailRow
+                label="Name"
+                value={selectedQueueItem.volunteer?.name}
+              />
+              <DetailRow
+                label="Phone"
+                value={selectedQueueItem.volunteer?.phone}
+              />
+              <DetailRow
+                label="Email"
+                value={selectedQueueItem.volunteer?.email}
+              />
+              <DetailRow
+                label="Outcome"
+                value={
+                  selectedQueueItem.volunteer_outcome
+                    ? statusLabel(selectedQueueItem.volunteer_outcome)
+                    : selectedQueueItem.vapi_call_id
+                      ? "Awaiting response"
+                      : undefined
+                }
+              />
+            </DetailSection>
+          )}
+
+          <RescueRouteMap
+            route={selectedQueueItem.route}
+            volunteerName={selectedQueueItem.volunteer?.name}
+            donorName={selectedQueueItem.donor?.name}
+            recipientName={
+              selectedQueueItem.recipient?.name ??
+              selectedQueueItem.delivery_organization
+            }
+          />
+
+          <DetailSection label="Rescue lifecycle">
+            <RescueStepList steps={buildRescueSteps(selectedQueueItem)} />
+          </DetailSection>
+
+          <DetailSection label="Timestamps & links">
+            <DetailRow
+              label="Created"
+              value={formatTime(selectedQueueItem.created_at) || undefined}
+            />
+            <DetailRow
+              label="Updated"
+              value={formatTime(selectedQueueItem.updated_at) || undefined}
+            />
+            <DetailRow
+              label="Vapi call"
+              value={selectedQueueItem.vapi_call_id}
+            />
+            <DetailRow
+              label="Calendar"
+              value={
+                selectedQueueItem.calendar_event_url ? (
+                  <a
+                    href={selectedQueueItem.calendar_event_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-semibold"
+                    style={{ color: C.green }}
+                  >
+                    Open event
+                  </a>
+                ) : undefined
+              }
+            />
+          </DetailSection>
+
+          {canPlaceCall(selectedQueueItem) && (
+            <button
+              type="button"
+              onClick={() => placeVolunteerCall(selectedQueueItem.id)}
+              disabled={callingId === selectedQueueItem.id}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-full px-4 py-3 text-[9px] font-bold uppercase tracking-[0.14em] disabled:opacity-60"
+              style={{
+                background: C.orange,
+                color: C.ink,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              <PhoneOutgoing className="h-3.5 w-3.5" />
+              {callingId === selectedQueueItem.id
+                ? "Calling..."
+                : "Place call"}
+            </button>
+          )}
+
+          {canRecordDecline(selectedQueueItem) && (
+            <button
+              type="button"
+              onClick={() => recordDecline(selectedQueueItem.id)}
+              disabled={decliningId === selectedQueueItem.id}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-full px-4 py-3 text-[9px] font-bold uppercase tracking-[0.14em] disabled:opacity-60"
+              style={{
+                background: "transparent",
+                color: C.red,
+                border: `1px solid ${C.red}`,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              <X className="h-3.5 w-3.5" />
+              {decliningId === selectedQueueItem.id
+                ? "Updating..."
+                : "Mark declined"}
+            </button>
+          )}
+
+          {canConfirmPickup(selectedQueueItem) && (
+            <button
+              type="button"
+              onClick={() => confirmPickup(selectedQueueItem.id)}
+              disabled={pickupState === "running"}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-full px-4 py-3 text-[9px] font-bold uppercase tracking-[0.14em] disabled:opacity-60"
+              style={{
+                background: "transparent",
+                color: C.paper,
+                border: `1px solid ${C.paper}`,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              <Truck className="h-3.5 w-3.5" />
+              {pickupState === "running" ? "Updating..." : "Mark picked up"}
+            </button>
+          )}
+
+          {canConfirmDelivery(selectedQueueItem) && (
+            <button
+              type="button"
+              onClick={() => confirmDelivery(selectedQueueItem.id)}
+              disabled={completeState === "running"}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-full px-4 py-3 text-[9px] font-bold uppercase tracking-[0.14em] disabled:opacity-60"
+              style={{
+                background: C.ink,
+                color: C.paper,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              <Check className="h-3.5 w-3.5" />
+              {completeState === "running"
+                ? "Confirming..."
+                : "Confirm delivery"}
+            </button>
+          )}
+        </DetailModal>
+      )}
+
+      {/* VOLUNTEER DETAIL */}
+
+      {selectedVolunteer && (
+        <DetailModal
+          title={selectedVolunteer.name ?? "Volunteer"}
+          subtitle={
+            selectedVolunteer.city
+              ? `Based in ${selectedVolunteer.city}`
+              : undefined
+          }
+          badge={
+            <span
+              className="rounded-full px-2.5 py-1 text-[8px] font-bold uppercase tracking-[0.12em]"
+              style={{
+                color: statusColor(selectedVolunteer.status),
+                border: `1px solid ${statusColor(selectedVolunteer.status)}`,
+                fontFamily: "IBM Plex Mono, monospace",
+              }}
+            >
+              {selectedVolunteer.status
+                ? statusLabel(selectedVolunteer.status)
+                : "Available"}
+            </span>
+          }
+          onClose={() => setSelectedVolunteerKey(null)}
+        >
+          <DetailSection label="Contact">
+            <DetailRow label="Name" value={selectedVolunteer.name} />
+            <DetailRow label="Email" value={selectedVolunteer.email} />
+            <DetailRow label="Phone" value={selectedVolunteer.phone} />
+            <DetailRow label="City" value={selectedVolunteer.city} />
+            <DetailRow
+              label="Zip code"
+              value={selectedVolunteer.starting_location_zip_code}
+            />
+          </DetailSection>
+
+          <DetailSection label="Availability">
+            <DetailRow
+              label="From"
+              value={
+                formatTime(selectedVolunteer.when_are_you_available_from) ||
+                selectedVolunteer.when_are_you_available_from ||
+                undefined
+              }
+            />
+            <DetailRow
+              label="Until"
+              value={
+                formatTime(selectedVolunteer.when_are_you_available_until) ||
+                selectedVolunteer.when_are_you_available_until ||
+                undefined
+              }
+            />
+            <DetailRow
+              label="Max distance"
+              value={
+                selectedVolunteer.what_is_the_maximum_distance_you_re_comfortable_traveling
+              }
+            />
+          </DetailSection>
+
+          <DetailSection label="Transport capacity">
+            <DetailRow
+              label="Transportation"
+              value={selectedVolunteer.what_transportation_do_you_have}
+            />
+            <DetailRow
+              label="Meal capacity"
+              value={
+                selectedVolunteer.how_many_meals_or_food_packages_can_you_transport
+              }
+            />
+            <DetailRow
+              label="Wants to help with"
+              value={selectedVolunteer.what_would_you_like_to_help_with}
+            />
+          </DetailSection>
+
+          {selectedVolunteer.are_there_any_transportation_or_scheduling_limitations_we_shoul && (
+            <DetailSection label="Limitations">
+              <div
+                className="text-xs leading-5"
+                style={{ color: "rgba(28,27,20,0.65)" }}
+              >
+                {
+                  selectedVolunteer.are_there_any_transportation_or_scheduling_limitations_we_shoul
+                }
+              </div>
+            </DetailSection>
+          )}
+
+          <DetailSection label="Signup">
+            <DetailRow
+              label="Registered"
+              value={
+                formatTime(
+                  selectedVolunteer.timestamp ??
+                    selectedVolunteer.created_at
+                ) || undefined
+              }
+            />
+          </DetailSection>
+        </DetailModal>
+      )}
 
       {/* ERROR */}
 
