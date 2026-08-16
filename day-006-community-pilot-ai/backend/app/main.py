@@ -290,7 +290,7 @@ async def intelligence():
     # WeatherAPI
     # ---------------------------------------------------------------
 
-    weather_api_key = os.getenv("WEATHER_API_KEY")
+    weather_api_key = (os.getenv("WEATHER_API_KEY") or "").strip()
 
     weather_location = os.getenv(
         "WEATHER_LOCATION",
@@ -313,6 +313,7 @@ async def intelligence():
                     "alerts": "yes",
                 },
                 timeout=8,
+                verify=tls_verify(),
             )
 
             if weather_response.ok:

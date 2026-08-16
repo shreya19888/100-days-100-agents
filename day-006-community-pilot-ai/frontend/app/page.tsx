@@ -154,6 +154,7 @@ type Intelligence = {
   };
   weather?: {
     status?: string;
+    error?: string;
     location?: string;
     temperature_f?: number;
     feels_like_f?: number;
@@ -4523,7 +4524,11 @@ export default function CommunityPilot() {
                         className="mt-2 text-xs leading-5"
                         style={{ color: C.muted }}
                       >
-                        The backend returned a weather status of {intelligence?.weather?.status ?? "unknown"}.
+                        The backend returned a weather status of{" "}
+                        {intelligence?.weather?.status ?? "unknown"}
+                        {intelligence?.weather?.error
+                          ? `: ${intelligence.weather.error}`
+                          : "."}
                       </p>
                     </div>
                   )}
